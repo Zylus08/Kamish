@@ -64,3 +64,10 @@ The final code revision passed Linux, macOS, and Windows workspace checks plus
 frontend/SDK and strict lint checks on GitHub. The release binary compiled, but
 packaging exposed a missing ignored output directory in clean checkouts. Packaging
 and the local clean-room script now create that directory before copying binaries.
+
+The freshly built release binary also passed the full clean-room install test in
+an isolated source archive: SDK typecheck, global install, init, policy verification,
+authenticated status/topic list, TCP produce/fetch, audit verification after shutdown,
+and uninstall. Windows/macOS portable package simulations passed as well. The
+clean-room test now invokes the pinned TypeScript compiler correctly and no longer
+kills unrelated `kamish start` processes globally.
