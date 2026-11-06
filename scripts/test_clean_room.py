@@ -48,6 +48,8 @@ def main():
     os.makedirs(sdk_test, exist_ok=True)
     os.makedirs(cluster_dir, exist_ok=True)
 
+    os.makedirs("packages/kamish-linux-x64/bin", exist_ok=True)
+
     # 0. Ensure native binary and packaged tarballs exist
     if not os.path.exists("packages/kamish-linux-x64/bin/kamish") or os.path.getsize("packages/kamish-linux-x64/bin/kamish") < 1024:
         run_cmd("Build Release Binary", "cargo build --release -p kamish && cp target/release/kamish packages/kamish-linux-x64/bin/kamish")

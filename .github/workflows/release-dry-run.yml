@@ -31,10 +31,14 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Prepare Rust build inputs
+        uses: ./.github/actions/prepare-rust
+
       - name: Build Unified Binary
         run: |
           cargo build --release -p kamish
           strip target/release/kamish
+          mkdir -p packages/kamish-linux-x64/bin
           cp target/release/kamish packages/kamish-linux-x64/bin/kamish
 
       - name: Generate SHA-256 Checksums

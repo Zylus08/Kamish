@@ -59,3 +59,8 @@ lease while staging fsynced records. These fixtures now stage under a valid leas
 and explicitly expire the in-memory test grant before promotion. All nine promotion
 and quarantine tests and their strict Clippy check pass locally; production lease
 or fencing behavior was not relaxed.
+
+The final code revision passed Linux, macOS, and Windows workspace checks plus
+frontend/SDK and strict lint checks on GitHub. The release binary compiled, but
+packaging exposed a missing ignored output directory in clean checkouts. Packaging
+and the local clean-room script now create that directory before copying binaries.
