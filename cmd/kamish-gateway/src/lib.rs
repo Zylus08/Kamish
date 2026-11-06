@@ -71,6 +71,108 @@ impl GatewayState {
     }
 }
 
+/// Serves static dashboard assets from `frontend/dist` with SPA routing and security caching.
+async fn static_dist_fallback_handler(uri: axum::http::Uri) -> Response {
+    let raw_path = uri.path();
+    if raw_path.starts_with("/api/") {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "API endpoint not found",
+                "path": raw_path
+            })),
+        )
+            .into_response();
+    }
+
+    // Locate dist directory
+    let dist_dir = if let Ok(val) = std::env::var("KAMISH_DIST_DIR") {
+        std::path::PathBuf::from(val)
+    } else if std::path::Path::new("frontend/dist").is_dir() {
+        std::path::PathBuf::from("frontend/dist")
+    } else if std::path::Path::new("../frontend/dist").is_dir() {
+        std::path::PathBuf::from("../frontend/dist")
+    } else if let Ok(exe) = std::env::current_exe() {
+        let exe_dir = exe.parent().unwrap_or(std::path::Path::new("."));
+        if exe_dir.join("../frontend/dist").is_dir() {
+            exe_dir.join("../frontend/dist")
+        } else if exe_dir.join("dist").is_dir() {
+            exe_dir.join("dist")
+        } else {
+            std::path::PathBuf::from("frontend/dist")
+        }
+    } else {
+        std::path::PathBuf::from("frontend/dist")
+    };
+
+    let subpath = raw_path.trim_start_matches('/');
+    let target_file = if subpath.is_empty() {
+        dist_dir.join("index.html")
+    } else {
+        let candidate = dist_dir.join(subpath);
+        if candidate.is_file() {
+            candidate
+        } else {
+            // SPA fallback: client-side routes like /topics, /audit, /telemetry serve index.html
+            dist_dir.join("index.html")
+        }
+    };
+
+    if target_file.is_file() {
+        match std::fs::read(&target_file) {
+            Ok(bytes) => {
+                let ext = target_file
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let content_type = match ext.to_lowercase().as_str() {
+                    "html" => "text/html; charset=utf-8",
+                    "js" | "mjs" => "application/javascript; charset=utf-8",
+                    "css" => "text/css; charset=utf-8",
+                    "svg" => "image/svg+xml",
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "wasm" => "application/wasm",
+                    "json" => "application/json",
+                    "gltf" => "model/gltf+json",
+                    "bin" | "glb" => "application/octet-stream",
+                    "woff2" => "font/woff2",
+                    "txt" => "text/plain; charset=utf-8",
+                    _ => "application/octet-stream",
+                };
+
+                let cache_control = if raw_path.starts_with("/assets/") {
+                    "public, max-age=31536000, immutable"
+                } else {
+                    "no-cache"
+                };
+
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", content_type)
+                    .header("cache-control", cache_control)
+                    .body(axum::body::Body::from(bytes))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            }
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    } else {
+        let html = r#"<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Kamish Gateway</title><style>body{background:#090414;color:#f8fafc;font-family:sans-serif;padding:3rem;text-align:center}h1{color:#38bdf8}code{background:#1e1b4b;padding:0.2rem 0.5rem;border-radius:4px}</style></head>
+<body>
+<h1>Kamish Unified Gateway & Broker</h1>
+<p>REST & SSE APIs are operational at <code>/api/*</code> and metrics at <code>/metrics</code>.</p>
+<p>To serve the full web dashboard, compile frontend assets with: <code>cd frontend && npm run build</code></p>
+</body></html>"#;
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/html; charset=utf-8")
+            .body(axum::body::Body::from(html))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    }
+}
+
 /// Builds the complete Axum Router with all authenticated endpoints, CORS, and CSRF protection.
 pub fn app(state: GatewayState) -> Router {
     Router::new()
@@ -109,6 +211,7 @@ pub fn app(state: GatewayState) -> Router {
         .route("/api/mode", get(get_mode_handler).post(set_mode_handler))
         // Server-Sent Events
         .route("/api/events", get(events_handler))
+        .fallback(static_dist_fallback_handler)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             security_middleware,
@@ -212,8 +315,8 @@ async fn security_middleware(
         return Ok(resp);
     }
 
-    // Public endpoints that do not require authentication
-    if path == "/api/auth/login" || path == "/metrics" {
+    // Public endpoints that do not require authentication: static web assets, login, and prometheus metrics
+    if !path.starts_with("/api/") || path == "/api/auth/login" || path == "/metrics" {
         let mut resp = next.run(req).await;
         apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), &state.allowed_origins, is_https);
         return Ok(resp);

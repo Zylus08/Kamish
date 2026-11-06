@@ -3687,3 +3687,44 @@ In strict compliance with execution directives:
 ### 39.6 Live Telemetry Realism & RBAC Awareness (`frontend/src/pages/`)
 - **`TelemetryPage.jsx` Realism:** Replaced hardcoded simulated values (12,479 msg/s, 1.4M records) in Live mode with real broker telemetry from `currentTelemetry` (sustained throughput `throughputEps`, outbox depth `outboxDepth`, replication lag `replicationLag`, local committed offset `localCommitted`). Added explicit disclaimers for latency percentiles (p50/p90/p99) noting that exact distributions require executing `benchmarks/orchestrator.mjs`, while preserving simulated demo metrics exclusively in Demo mode with clear `[SIMULATED]` indicators.
 - **`ProduceFetchPage.jsx` RBAC Status:** Added an active Operator Session & RBAC Status banner. Evaluates operator roles (`Producer`, `Consumer`, `Operator`, `Admin`) against backend gateway security middleware requirements, alerting unauthenticated or role-restricted operators before initiating requests.
+
+
+---
+
+## 40. All-In-One Unified Packaging & Single-Command Distribution (ADR-006) (2026-11-06)
+
+### 40.1 Mission & Scope
+To resolve the native binary resolution failure encountered during global npm execution (`npm install -g kamish` -> `kamish run --dev`), the architectural specifications in ADR-006 (*All-In-One Unified Packaging and Single-Command Global Distribution*) were fully implemented. This consolidates the independent service binaries, REST/SSE gateway, and embedded dashboard into a single platform-native binary (`cmd/kamish`), backed by the global npm CLI wrapper.
+
+### 40.2 Implementation Deliverables
+
+1. **Static Web Dashboard Serving in Gateway (`cmd/kamish-gateway/src/lib.rs`):**
+   - Added `static_dist_fallback_handler` to Axum routing, serving compiled assets from `frontend/dist`.
+   - Supports SPA client routing by returning `index.html` for client-side navigation paths (`/topics`, `/audit`, `/telemetry`).
+   - Added immutable long-term caching (`Cache-Control: public, max-age=31536000, immutable`) for `/assets/` and `no-cache` for HTML.
+   - Enforced strict `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, and `X-Frame-Options: DENY`.
+   - Configured `security_middleware` to bypass API authentication for static web assets while maintaining strict RBAC on `/api/*`.
+
+2. **Unified Native Binary Crate (`cmd/kamish/`):**
+   - Added `cmd/kamish` to workspace members in `Cargo.toml`.
+   - **`kamish start` / `kamish run` (`src/start.rs`):**
+     - Orchestrates `BrokerServer`, `Enforcer`, `AuditLog`, `MetadataStore`, and `TenantCatalog` alongside the REST/SSE gateway and web dashboard in a single process.
+     - Supports `--dev` mode for local evaluation (pre-provisioning `admin`, `operator`, `auditor`, `producer`, `consumer` credentials and default topics).
+     - Directly supports `kamish run --dev` as a first-class developer alias.
+   - **`kamish doctor` (`src/doctor.rs`):**
+     - Performs automated prerequisite validation: HTTP port 3001, broker port 8080, storage WAL write permissions, static dashboard asset presence, configuration file validation, and consensus authority probing (`AUTHORITY: LOCAL` without etcd; quorum reachability with etcd).
+   - **`kamish init` (`src/init.rs`):**
+     - Automated cluster bootstrap authoring `kamish.toml`, generating Ed25519 residency policy signing keypair (`policy.key`, `policy.pub`), and authoring/signing the genesis residency policy (`policy.json`).
+   - **`kamish status` (`src/status.rs`):**
+     - Inspects active gateway status, consensus backing, lease authority, and in-region quorum state.
+   - **`kamish topic` (`src/topic.rs`):**
+     - Topic catalog management (`list`, `create`).
+   - **`kamish policy` (`src/policy.rs`):**
+     - Cryptographic policy authoring, Ed25519 signing, signature verification, and gateway publication.
+   - **Admin & Control Subcommands:**
+     - Direct integration of `produce`, `consume`/`fetch`, `verify-audit`, `demo`, `benchmark`, `watermark`, and `promote` via `kamish_ctl`.
+
+3. **Global npm Wrapper Harmonization (`packages/kamish/`):**
+   - Packaged `@kamish/kamish` CLI launcher in `packages/kamish/`.
+   - Updated `bin/kamish.js` to automatically inspect local workspace compile targets on Windows (`target/debug/kamish.exe`, `target/release/kamish.exe`, and current working directory targets) in addition to `KAMISH_BINARY_PATH` and npm `optionalDependencies`.
+   - Updated the active global npm installation so `kamish --help`, `kamish doctor`, and `kamish run --dev` execute directly on the user's system.

@@ -58,8 +58,8 @@ While this architecture minimizes serialization latency and simplifies single-bi
 
 ## ADR-006: All-In-One Unified Packaging and Single-Command Global Distribution
 
-**Status**: PROPOSED (Awaiting User Confirmation)  
-**Date**: 2026-11-01  
+**Status**: ACCEPTED & IMPLEMENTED  
+**Date**: 2026-11-06  
 **Deciders**: Platform Architecture & Core Engineering  
 
 ---
