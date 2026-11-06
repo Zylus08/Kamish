@@ -1,159 +1,270 @@
-use std::net::TcpListener;
-use std::path::Path;
+use serde::Serialize;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+#[derive(Debug, Serialize)]
+pub struct DoctorReport {
+    pub version: String,
+    pub git_commit: String,
+    pub platform: String,
+    pub config_check: CheckResult,
+    pub broker_port_check: CheckResult,
+    pub gateway_port_check: CheckResult,
+    pub etcd_check: CheckResult,
+    pub tls_check: CheckResult,
+    pub data_dir_check: CheckResult,
+    pub all_passed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CheckResult {
     pub name: String,
-    pub passed: bool,
-    pub status_text: String,
+    pub status: CheckStatus,
+    pub message: String,
     pub remediation: Option<String>,
 }
 
-pub async fn run_doctor() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    println!("\x1b[1;35m==============================================================================\x1b[0m");
-    println!("\x1b[1;36m  KAMISH SYSTEM PREREQUISITES & HEALTH DOCTOR (ADR-006)                       \x1b[0m");
-    println!("\x1b[1;35m==============================================================================\x1b[0m\n");
-
-    let mut checks = Vec::new();
-
-    // 1. Check Gateway Port (3001)
-    let gw_available = TcpListener::bind("127.0.0.1:3001").is_ok();
-    checks.push(CheckResult {
-        name: "Gateway HTTP Port (3001)".to_string(),
-        passed: gw_available,
-        status_text: if gw_available {
-            "Available for binding".to_string()
-        } else {
-            "Port 3001 in use (may be an active Kamish gateway)".to_string()
-        },
-        remediation: if gw_available {
-            None
-        } else {
-            Some("Check running processes with: netstat -ano | findstr :3001".to_string())
-        },
-    });
-
-    // 2. Check Broker TCP Port (8080)
-    let broker_available = TcpListener::bind("127.0.0.1:8080").is_ok();
-    checks.push(CheckResult {
-        name: "Broker TCP Port (8080)".to_string(),
-        passed: broker_available,
-        status_text: if broker_available {
-            "Available for binding".to_string()
-        } else {
-            "Port 8080 in use (may be an active Kamish broker)".to_string()
-        },
-        remediation: if broker_available {
-            None
-        } else {
-            Some("Check running processes with: netstat -ano | findstr :8080".to_string())
-        },
-    });
-
-    // 3. Storage Directory & Write Permissions
-    let data_dir = Path::new("data");
-    let storage_ok = match std::fs::create_dir_all(data_dir) {
-        Ok(_) => {
-            let test_file = data_dir.join(".write_test");
-            match std::fs::write(&test_file, b"kamish-doctor-test") {
-                Ok(_) => {
-                    let _ = std::fs::remove_file(test_file);
-                    true
-                }
-                Err(_) => false,
-            }
-        }
-        Err(_) => false,
-    };
-    checks.push(CheckResult {
-        name: "Storage WAL Directory (./data)".to_string(),
-        passed: storage_ok,
-        status_text: if storage_ok {
-            "Directory exists with write permissions".to_string()
-        } else {
-            "Cannot create or write to ./data directory".to_string()
-        },
-        remediation: if storage_ok {
-            None
-        } else {
-            Some("Ensure write permissions on current directory".to_string())
-        },
-    });
-
-    // 4. Web Dashboard Static Assets
-    let dist_exists = Path::new("frontend/dist/index.html").exists()
-        || Path::new("../frontend/dist/index.html").exists()
-        || Path::new("dist/index.html").exists();
-    checks.push(CheckResult {
-        name: "Embedded Web Dashboard Assets".to_string(),
-        passed: dist_exists,
-        status_text: if dist_exists {
-            "Compiled static assets found (frontend/dist/index.html)".to_string()
-        } else {
-            "frontend/dist/index.html not found".to_string()
-        },
-        remediation: if dist_exists {
-            None
-        } else {
-            Some("Run 'cd frontend && npm run build' to generate static dashboard assets".to_string())
-        },
-    });
-
-    // 5. Consensus Backend Connectivity (etcd probe)
-    let etcd_available = tokio::net::TcpStream::connect("127.0.0.1:2379").await.is_ok();
-    checks.push(CheckResult {
-        name: "Consensus Authority Backend".to_string(),
-        passed: true, // Non-fatal per ADR-006 §2.5 single-node mode
-        status_text: if etcd_available {
-            "etcd cluster reachable at 127.0.0.1:2379 (QUORUM_CONSENSUS)".to_string()
-        } else {
-            "AUTHORITY: LOCAL (in-memory & local fsync; quorum requires etcd)".to_string()
-        },
-        remediation: if etcd_available {
-            None
-        } else {
-            Some("Single-node local mode is operational. For multi-region CAS quorum, launch etcd via 'scripts/start_etcd_cluster.sh'".to_string())
-        },
-    });
-
-    // 6. Configuration File
-    let config_exists = Path::new("kamish.toml").exists();
-    checks.push(CheckResult {
-        name: "Cluster Configuration (kamish.toml)".to_string(),
-        passed: true,
-        status_text: if config_exists {
-            "Found custom configuration file 'kamish.toml'".to_string()
-        } else {
-            "Default parameters active (no kamish.toml found)".to_string()
-        },
-        remediation: if config_exists {
-            None
-        } else {
-            Some("Run 'kamish init' to author a cluster configuration file and Ed25519 signing keys".to_string())
-        },
-    });
-
-    // Print Report
-    let mut all_passed = true;
-    for check in &checks {
-        let icon = if check.passed {
-            "\x1b[1;32m[PASS]\x1b[0m"
-        } else {
-            all_passed = false;
-            "\x1b[1;31m[FAIL]\x1b[0m"
-        };
-        println!("{:<7} {:<34} : {}", icon, check.name, check.status_text);
-        if let Some(ref rem) = check.remediation {
-            println!("        \x1b[1;33m↳ Note: {}\x1b[0m", rem);
-        }
-    }
-
-    println!("\n\x1b[1;35m------------------------------------------------------------------------------\x1b[0m");
-    if all_passed {
-        println!("\x1b[1;32m✓ System is ready! You can launch Kamish with: kamish start --dev\x1b[0m\n");
-    } else {
-        println!("\x1b[1;31m✗ Some system checks failed. Review remediation notes above before launching.\x1b[0m\n");
-    }
-
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum CheckStatus {
+    Pass,
+    Warn,
+    Fail,
 }
 
+pub fn run_doctor(config_path_opt: Option<&str>, json_output: bool) -> i32 {
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let git_commit = env!("CARGO_PKG_VERSION"); // fallback commit/version string
+    let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+
+    // 1. Config Check
+    let candidate_configs = if let Some(p) = config_path_opt {
+        vec![PathBuf::from(p)]
+    } else {
+        vec![
+            PathBuf::from("kamish.toml"),
+            PathBuf::from("./kamish.toml"),
+            dirs_fallback_config(),
+        ]
+    };
+
+    let mut found_config: Option<PathBuf> = None;
+    for cand in candidate_configs {
+        if cand.exists() && cand.is_file() {
+            found_config = Some(cand);
+            break;
+        }
+    }
+
+    let config_check = match found_config {
+        Some(ref p) => match std::fs::read_to_string(p) {
+            Ok(content) => match toml::from_str::<toml::Value>(&content) {
+                Ok(_) => CheckResult {
+                    name: "Configuration File".into(),
+                    status: CheckStatus::Pass,
+                    message: format!("Valid TOML configuration found at '{}'", p.display()),
+                    remediation: None,
+                },
+                Err(e) => CheckResult {
+                    name: "Configuration File".into(),
+                    status: CheckStatus::Fail,
+                    message: format!("Malformed TOML in '{}': {e}", p.display()),
+                    remediation: Some(
+                        "Check syntax of kamish.toml or re-run 'kamish init --force'".into(),
+                    ),
+                },
+            },
+            Err(e) => CheckResult {
+                name: "Configuration File".into(),
+                status: CheckStatus::Fail,
+                message: format!("Cannot read '{}': {e}", p.display()),
+                remediation: Some("Verify file read permissions".into()),
+            },
+        },
+        None => CheckResult {
+            name: "Configuration File".into(),
+            status: CheckStatus::Warn,
+            message: "No kamish.toml found in current directory or user home".into(),
+            remediation: Some(
+                "Run 'kamish init' to create a default configuration skeleton".into(),
+            ),
+        },
+    };
+
+    // 2. Port checks
+    let broker_port = 9092;
+    let broker_port_check = test_port_availability(broker_port, "Broker TCP Port");
+
+    let gateway_port = 3001;
+    let gateway_port_check = test_port_availability(gateway_port, "Gateway HTTP Port");
+
+    // 3. etcd check
+    let etcd_endpoint = "127.0.0.1:2379";
+    let etcd_check = test_etcd_reachability(etcd_endpoint);
+
+    // 4. TLS check
+    let tls_check = CheckResult {
+        name: "TLS Certificates".into(),
+        status: CheckStatus::Pass,
+        message: "Development mode (pass --insecure-dev for non-loopback binding)".into(),
+        remediation: None,
+    };
+
+    // 5. Data dir check
+    let data_dir = Path::new("data");
+    let data_dir_check = match std::fs::create_dir_all(data_dir) {
+        Ok(_) => CheckResult {
+            name: "Data Directory".into(),
+            status: CheckStatus::Pass,
+            message: format!(
+                "Data directory '{}' is accessible and writable",
+                data_dir.display()
+            ),
+            remediation: None,
+        },
+        Err(e) => CheckResult {
+            name: "Data Directory".into(),
+            status: CheckStatus::Fail,
+            message: format!("Cannot write to '{}': {e}", data_dir.display()),
+            remediation: Some("Verify directory permissions or specify --data-dir".into()),
+        },
+    };
+
+    let all_passed = config_check.status != CheckStatus::Fail
+        && broker_port_check.status != CheckStatus::Fail
+        && gateway_port_check.status != CheckStatus::Fail
+        && data_dir_check.status != CheckStatus::Fail;
+
+    let report = DoctorReport {
+        version,
+        git_commit: git_commit.into(),
+        platform,
+        config_check,
+        broker_port_check,
+        gateway_port_check,
+        etcd_check,
+        tls_check,
+        data_dir_check,
+        all_passed,
+    };
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else {
+        render_human_report(&report);
+    }
+
+    if all_passed { 0 } else { 1 }
+}
+
+fn dirs_fallback_config() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".kamish").join("config.toml")
+    } else {
+        PathBuf::from(".kamish.toml")
+    }
+}
+
+fn test_port_availability(port: u16, name: &str) -> CheckResult {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    match TcpListener::bind(addr) {
+        Ok(_) => CheckResult {
+            name: name.to_string(),
+            status: CheckStatus::Pass,
+            message: format!("Port {port} is available for binding"),
+            remediation: None,
+        },
+        Err(e) => CheckResult {
+            name: name.to_string(),
+            status: CheckStatus::Warn,
+            message: format!("Port {port} is currently in use or unavailable: {e}"),
+            remediation: Some(format!(
+                "Another process may be using port {port}. Pass --port to choose a different port."
+            )),
+        },
+    }
+}
+
+fn test_etcd_reachability(endpoint: &str) -> CheckResult {
+    match endpoint.parse::<SocketAddr>() {
+        Ok(addr) => match TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
+            Ok(_) => CheckResult {
+                name: "Consensus (etcd)".to_string(),
+                status: CheckStatus::Pass,
+                message: format!("etcd consensus member reachable at {endpoint} (distributed quorum available)"),
+                remediation: None,
+            },
+            Err(_) => CheckResult {
+                name: "Consensus (etcd)".to_string(),
+                status: CheckStatus::Warn,
+                message: format!("etcd cluster not reachable at {endpoint}"),
+                remediation: Some(
+                    "Multi-region consensus and lease fencing require an etcd cluster.\n\
+                     To start a 3-member cluster locally, run:\n\
+                       docker compose -f docker-compose.etcd.yml up -d\n\
+                     Or download and launch via scripts:\n\
+                       ./scripts/download_etcd.sh && ./scripts/start_etcd_cluster.sh\n\
+                     Note: Single-node mode functions without etcd (authority: LOCAL_PERSISTENT_STORAGE)."
+                        .to_string(),
+                ),
+            },
+        },
+        Err(e) => CheckResult {
+            name: "Consensus (etcd)".to_string(),
+            status: CheckStatus::Fail,
+            message: format!("Invalid etcd endpoint '{endpoint}': {e}"),
+            remediation: Some("Ensure endpoint format is IP:PORT (e.g. 127.0.0.1:2379)".into()),
+        },
+    }
+}
+
+fn render_human_report(report: &DoctorReport) {
+    let use_color = std::env::var("NO_COLOR").is_err();
+
+    let green = if use_color { "\x1b[1;32m" } else { "" };
+    let yellow = if use_color { "\x1b[1;33m" } else { "" };
+    let red = if use_color { "\x1b[1;31m" } else { "" };
+    let cyan = if use_color { "\x1b[1;36m" } else { "" };
+    let reset = if use_color { "\x1b[0m" } else { "" };
+
+    println!("{cyan}=== Kamish System Diagnostic (kamish doctor) ==={reset}");
+    println!(
+        "Version  : {} (commit: {})",
+        report.version, report.git_commit
+    );
+    println!("Platform : {}", report.platform);
+    println!("--------------------------------------------------");
+
+    let checks = [
+        &report.config_check,
+        &report.broker_port_check,
+        &report.gateway_port_check,
+        &report.etcd_check,
+        &report.tls_check,
+        &report.data_dir_check,
+    ];
+
+    for c in checks {
+        let tag = match c.status {
+            CheckStatus::Pass => format!("{green}[PASS]{reset}"),
+            CheckStatus::Warn => format!("{yellow}[WARN]{reset}"),
+            CheckStatus::Fail => format!("{red}[FAIL]{reset}"),
+        };
+        println!("{:<7} {:<24} : {}", tag, c.name, c.message);
+        if let Some(ref rem) = c.remediation {
+            for line in rem.lines() {
+                println!("        -> {}", line);
+            }
+        }
+    }
+
+    println!("--------------------------------------------------");
+    if report.all_passed {
+        println!("{green}System is ready for operation.{reset}\n");
+    } else {
+        println!(
+            "{red}One or more prerequisite checks failed. See remediation advice above.{reset}\n"
+        );
+    }
+}

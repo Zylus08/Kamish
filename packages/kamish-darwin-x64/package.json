@@ -1,0 +1,27 @@
+{
+  "name": "kamish-darwin-x64",
+  "version": "0.1.0-alpha.1",
+  "description": "Native macOS Intel binary for Kamish sovereign event streaming broker and CLI",
+  "license": "Apache-2.0",
+  "author": "Kamish Team",
+  "type": "module",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "bin": {
+    "kamish": "bin/kamish"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false
+}

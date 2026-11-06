@@ -879,3 +879,38 @@ async fn test_sliding_window_rate_limiting() {
         "Rate limiter should throttle after burst exceeding limit"
     );
 }
+
+#[tokio::test]
+async fn static_assets_reject_traversal_without_authentication() {
+    let (app, _dir) = setup_test_gateway();
+    for path in [
+        "/../policy.key",
+        "/models/../../policy.key",
+        "/%2e%2e/policy.key",
+        "/models/%2fetc/passwd",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[test]
+fn static_assets_require_canonical_directory_containment() {
+    let root = tempfile::tempdir().unwrap();
+    let dist = root.path().join("dist");
+    std::fs::create_dir(&dist).unwrap();
+    std::fs::write(dist.join("index.html"), "dashboard").unwrap();
+    std::fs::write(root.path().join("secret.key"), "sentinel").unwrap();
+    assert!(kamish_gateway::contained_asset_file(&dist, &dist.join("index.html")).is_some());
+    assert!(kamish_gateway::contained_asset_file(&dist, &dist.join("../secret.key")).is_none());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.path().join("secret.key"), dist.join("escape.key"))
+            .unwrap();
+        assert!(kamish_gateway::contained_asset_file(&dist, &dist.join("escape.key")).is_none());
+    }
+}

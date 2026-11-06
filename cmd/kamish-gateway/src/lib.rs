@@ -71,6 +71,25 @@ impl GatewayState {
     }
 }
 
+/// Asset URLs must contain only relative normal components. Reject encoded
+/// separators/dot segments too; asset filenames never require percent escapes.
+pub fn safe_asset_path(path: &str) -> bool {
+    !path.contains(['%', '\\'])
+        && std::path::Path::new(path)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
+/// Canonical containment also prevents symlink escapes from an asset directory.
+pub fn contained_asset_file(
+    root: &std::path::Path,
+    candidate: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let root = root.canonicalize().ok()?;
+    let candidate = candidate.canonicalize().ok()?;
+    (candidate.starts_with(&root) && candidate.is_file()).then_some(candidate)
+}
+
 /// Serves static dashboard assets from `frontend/dist` with SPA routing and security caching.
 async fn static_dist_fallback_handler(uri: axum::http::Uri) -> Response {
     let raw_path = uri.path();
@@ -106,12 +125,17 @@ async fn static_dist_fallback_handler(uri: axum::http::Uri) -> Response {
     };
 
     let subpath = raw_path.trim_start_matches('/');
+    if !safe_asset_path(subpath) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let target_file = if subpath.is_empty() {
         dist_dir.join("index.html")
     } else {
         let candidate = dist_dir.join(subpath);
         if candidate.is_file() {
             candidate
+        } else if std::path::Path::new(subpath).extension().is_some() {
+            return StatusCode::NOT_FOUND.into_response();
         } else {
             // SPA fallback: client-side routes like /topics, /audit, /telemetry serve index.html
             dist_dir.join("index.html")
@@ -119,7 +143,10 @@ async fn static_dist_fallback_handler(uri: axum::http::Uri) -> Response {
     };
 
     if target_file.is_file() {
-        match std::fs::read(&target_file) {
+        let Some(target_file) = contained_asset_file(&dist_dir, &target_file) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        match tokio::fs::read(&target_file).await {
             Ok(bytes) => {
                 let ext = target_file
                     .extension()
@@ -248,27 +275,28 @@ fn apply_security_headers(
     // development should use the Vite same-origin proxy; direct-origin dev
     // setups must opt in via --allowed-origins / KAMISH_GATEWAY_ALLOWED_ORIGINS.
     let is_allowed = req_origin.is_some_and(|origin| {
-        allowed_origins.iter().any(|allowed| allowed.trim() == origin)
+        allowed_origins
+            .iter()
+            .any(|allowed| allowed.trim() == origin)
     });
 
-    if is_allowed {
-        if let Some(o) = req_origin {
-            if let Ok(val) = o.parse() {
-                headers.insert("access-control-allow-origin", val);
-                headers.insert("access-control-allow-credentials", "true".parse().unwrap());
-                headers.insert(
-                    "access-control-allow-headers",
-                    "content-type, authorization, x-csrf-token".parse().unwrap(),
-                );
-                headers.insert(
-                    "access-control-allow-methods",
-                    "GET, POST, PUT, DELETE, OPTIONS".parse().unwrap(),
-                );
-            }
-        }
-
-        }
+    if is_allowed
+        && let Some(o) = req_origin
+        && let Ok(val) = o.parse()
+    {
+        headers.insert("access-control-allow-origin", val);
+        headers.insert("access-control-allow-credentials", "true".parse().unwrap());
+        headers.insert(
+            "access-control-allow-headers",
+            "content-type, authorization, x-csrf-token".parse().unwrap(),
+        );
+        headers.insert(
+            "access-control-allow-methods",
+            "GET, POST, PUT, DELETE, OPTIONS".parse().unwrap(),
+        );
+        headers.append("vary", "Origin".parse().unwrap());
     }
+}
 
 async fn security_middleware(
     State(state): State<GatewayState>,
@@ -302,7 +330,12 @@ async fn security_middleware(
             })),
         )
             .into_response();
-        apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), &state.allowed_origins, is_https);
+        apply_security_headers(
+            resp.headers_mut(),
+            origin_opt.as_deref(),
+            &state.allowed_origins,
+            is_https,
+        );
         return Ok(resp);
     }
 
@@ -311,14 +344,24 @@ async fn security_middleware(
 
     if method == Method::OPTIONS {
         let mut resp = StatusCode::NO_CONTENT.into_response();
-        apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), &state.allowed_origins, is_https);
+        apply_security_headers(
+            resp.headers_mut(),
+            origin_opt.as_deref(),
+            &state.allowed_origins,
+            is_https,
+        );
         return Ok(resp);
     }
 
     // Public endpoints that do not require authentication: static web assets, login, and prometheus metrics
     if !path.starts_with("/api/") || path == "/api/auth/login" || path == "/metrics" {
         let mut resp = next.run(req).await;
-        apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), &state.allowed_origins, is_https);
+        apply_security_headers(
+            resp.headers_mut(),
+            origin_opt.as_deref(),
+            &state.allowed_origins,
+            is_https,
+        );
         return Ok(resp);
     }
 
@@ -350,7 +393,12 @@ async fn security_middleware(
                 })),
             )
                 .into_response();
-            apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), &state.allowed_origins, is_https);
+            apply_security_headers(
+                resp.headers_mut(),
+                origin_opt.as_deref(),
+                &state.allowed_origins,
+                is_https,
+            );
             return Ok(resp);
         }
     };
@@ -369,7 +417,12 @@ async fn security_middleware(
                 })),
             )
                 .into_response();
-            apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), &state.allowed_origins, is_https);
+            apply_security_headers(
+                resp.headers_mut(),
+                origin_opt.as_deref(),
+                &state.allowed_origins,
+                is_https,
+            );
             return Ok(resp);
         }
     }
@@ -396,13 +449,23 @@ async fn security_middleware(
             })),
         )
             .into_response();
-        apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), &state.allowed_origins, is_https);
+        apply_security_headers(
+            resp.headers_mut(),
+            origin_opt.as_deref(),
+            &state.allowed_origins,
+            is_https,
+        );
         return Ok(resp);
     }
 
     req.extensions_mut().insert(session);
     let mut response = next.run(req).await;
-    apply_security_headers(response.headers_mut(), origin_opt.as_deref(), &state.allowed_origins, is_https);
+    apply_security_headers(
+        response.headers_mut(),
+        origin_opt.as_deref(),
+        &state.allowed_origins,
+        is_https,
+    );
     Ok(response)
 }
 
@@ -767,25 +830,42 @@ async fn policy_handler(State(state): State<GatewayState>) -> Json<serde_json::V
 }
 
 #[derive(Deserialize)]
-struct PublishPolicyRequest {
-    policy_version: u64,
+#[serde(untagged)]
+enum PublishPolicyRequest {
+    Signed(Box<kamish_policy::SignedPolicy>),
+    Floor { policy_version: u64 },
 }
 
 async fn publish_policy_handler(
     State(state): State<GatewayState>,
     Json(payload): Json<PublishPolicyRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let bad_request = |error: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error})),
+        )
+    };
+    let policy_cache = state.broker.enforcer.policy_cache();
+    let mut cache = policy_cache.write().unwrap();
+    let mut next = cache.clone();
+    let version = match payload {
+        PublishPolicyRequest::Signed(signed) => {
+            let version = signed.policy.version;
+            next.update(*signed, chrono::Utc::now().timestamp())
+                .map_err(|error| bad_request(error.to_string()))?;
+            version
+        }
+        PublishPolicyRequest::Floor { policy_version } => policy_version,
+    };
     let cluster_id = format!("cluster-{}", state.broker.region);
     let new_floor = state
         .broker
         .meta
-        .advance_policy_floor(&cluster_id, payload.policy_version)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+        .advance_policy_floor(&cluster_id, version)
+        .map_err(|error| bad_request(error.to_string()))?;
+    next.set_version_floor(new_floor);
+    *cache = next;
 
     let _ = state.event_tx.send(format!(
         "POLICY_UPDATE: version floor bumped to {}",
@@ -1089,26 +1169,45 @@ async fn list_topics_handler(State(state): State<GatewayState>) -> Json<serde_js
     Json(serde_json::json!({ "topics": topics }))
 }
 
+fn default_general_class() -> String {
+    "general".to_string()
+}
+
+fn default_partition_count() -> u32 {
+    1
+}
+
+fn default_max_records() -> usize {
+    100
+}
+
 #[derive(Deserialize)]
 struct CreateTopicRequest {
     topic: String,
+    #[serde(default)]
+    tenant_id: Option<String>,
+    #[serde(default = "default_partition_count")]
     partition_count: u32,
+    #[serde(default = "default_general_class")]
     class_id: String,
 }
 
 async fn create_topic_handler(
     State(state): State<GatewayState>,
+    axum::extract::Extension(session): axum::extract::Extension<auth::Session>,
     Json(payload): Json<CreateTopicRequest>,
 ) -> Json<serde_json::Value> {
     {
         let mut classes = HashSet::new();
         classes.insert(payload.class_id.clone());
-        let meta = TopicMetadata::new(
-            &payload.topic,
-            "tenant-default",
-            payload.partition_count,
-            classes,
-        );
+        let owner = if session.role.is_admin() && payload.tenant_id.is_some() {
+            payload.tenant_id.clone().unwrap()
+        } else if session.tenant_id.is_empty() {
+            "tenant-default".to_string()
+        } else {
+            session.tenant_id.clone()
+        };
+        let meta = TopicMetadata::new(&payload.topic, owner, payload.partition_count, classes);
 
         let mut catalog = state.broker.catalog.write().unwrap();
         catalog.register_topic(meta);
@@ -1132,9 +1231,13 @@ async fn create_topic_handler(
 #[derive(Deserialize)]
 struct ProduceMessageRequest {
     topic: String,
+    #[serde(default)]
     partition: u32,
+    #[serde(default = "default_general_class")]
     class_id: String,
     payload: String,
+    #[serde(default)]
+    residency_rule: Option<kamish_meta::ResidencyPolicy>,
 }
 
 async fn produce_handler(
@@ -1150,7 +1253,7 @@ async fn produce_handler(
         sequence_base: 0,
         class_id: payload.class_id.clone(),
         payload: payload.payload.into_bytes(),
-        residency_rule: None,
+        residency_rule: payload.residency_rule,
     };
 
     let client_identity = kamish_broker::tls::ClientIdentity::new(
@@ -1195,9 +1298,13 @@ async fn produce_handler(
 #[derive(Deserialize)]
 struct FetchMessageRequest {
     topic: String,
+    #[serde(default)]
     partition: u32,
+    #[serde(default)]
     offset: u64,
+    #[serde(default = "default_max_records")]
     max_records: usize,
+    #[serde(default)]
     class_id: Option<String>,
 }
 

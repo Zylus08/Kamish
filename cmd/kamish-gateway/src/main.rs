@@ -136,7 +136,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    let state = GatewayState::new_with_store(broker, user_store).with_allowed_origins(allowed_origins);
+    let state =
+        GatewayState::new_with_store(broker, user_store).with_allowed_origins(allowed_origins);
     let app = app(state);
 
     let bind_addr = format!("{}:{}", args.host, args.port);

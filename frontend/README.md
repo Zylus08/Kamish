@@ -84,5 +84,7 @@ If the frontend and gateway are hosted on distinct domains (e.g., `https://conso
 ## Verification & Status
 
 - Automated tests passing at verified source revision `3bab18053c9d7a7256d8e00981531cf67a815b50` (261 unit & integration tests).
-- Frontend production build (`npm run build`) verifies TypeScript compilation and asset bundling.
+- Run `npm run typecheck` for TypeScript validation and `npm run build` for production asset bundling.
+- Live telemetry refreshes at most once every five seconds; overlapping polls and SSE bursts share one refresh. Five requests per refresh leave capacity for interactive operations under the gateway's 120-request/minute limit.
+- CLI mutations retrieve the session CSRF token from `/api/auth/me`; signed policy publication requires a trusted issuer and the configured policy identity.
 - For complete evidence reconciliation, see [`RECONCILIATION_REPORT.md`](../audit/release_verification_20261101/RECONCILIATION_REPORT.md).

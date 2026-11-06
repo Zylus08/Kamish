@@ -13,23 +13,23 @@
   },
   "files": [
     "bin",
+    "lib",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
   ],
   "dependencies": {
-    "@kamish/client": "0.1.0-alpha.1"
+    "kamish-client": "0.1.0-alpha.1"
   },
   "optionalDependencies": {
-    "@kamish/kamish-linux-x64": "0.1.0-alpha.1",
-    "@kamish/kamish-linux-arm64": "0.1.0-alpha.1",
-    "@kamish/kamish-darwin-x64": "0.1.0-alpha.1",
-    "@kamish/kamish-darwin-arm64": "0.1.0-alpha.1",
-    "@kamish/kamish-win32-x64": "0.1.0-alpha.1"
+    "kamish-linux-x64": "0.1.0-alpha.1",
+    "kamish-linux-arm64": "0.1.0-alpha.1",
+    "kamish-darwin-x64": "0.1.0-alpha.1",
+    "kamish-darwin-arm64": "0.1.0-alpha.1",
+    "kamish-win32-x64": "0.1.0-alpha.1"
   },
   "publishConfig": {
     "access": "public"
   },
   "sideEffects": false
 }
-

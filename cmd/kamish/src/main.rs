@@ -1,180 +1,517 @@
-mod doctor;
-mod init;
-mod policy;
-mod start;
-mod status;
-mod topic;
+pub mod assets;
+pub mod completion;
+pub mod ctl;
+pub mod doctor;
+pub mod init;
+pub mod policy_cmd;
+pub mod seed;
+pub mod start;
+pub mod status;
+pub mod topic;
 
-use clap::{Parser, Subcommand};
-use start::StartArgs;
+use clap::{CommandFactory, Parser, Subcommand};
+use ctl::PolicyChoice;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "kamish",
-    about = "Unified sovereign event streaming CLI, broker daemon, and embedded dashboard (ADR-006)",
-    version
+    version = env!("CARGO_PKG_VERSION"),
+    about = "Kamish: Sovereign Event Streaming Broker, Gateway & Management CLI",
+    long_about = "Kamish delivers verifiable data sovereignty across hybrid multi-region topologies\nwith continuous cryptographic enforcement and zero unsolicited telemetry."
 )]
-pub struct Cli {
+struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum Commands {
-    /// Launch the unified broker daemon, REST/SSE gateway, and embedded dashboard
-    Start(StartArgs),
+enum Commands {
+    /// Start the sovereign broker, gateway API, and embedded dashboard in one process
+    #[command(alias = "run")]
+    Start {
+        /// Path to TOML configuration file
+        #[arg(short, long)]
+        config: Option<String>,
 
-    /// Run the unified broker, gateway, and dashboard (alias for start, e.g. 'kamish run --dev')
-    Run(StartArgs),
+        /// Gateway HTTP and Dashboard port
+        #[arg(short, long, default_value_t = 3001)]
+        port: u16,
 
-    /// Diagnose system readiness, port availability, consensus reachability, and configuration
-    Doctor,
+        /// Broker TCP messaging port
+        #[arg(short = 'b', long, default_value_t = 9092)]
+        broker_port: u16,
 
-    /// Author cluster configuration skeleton, Ed25519 signing keys, and genesis policy
+        /// Data directory for partition logs and audit chains
+        #[arg(short, long, default_value = "./data/kamish")]
+        data_dir: String,
+
+        /// Local region identifier
+        #[arg(short, long, default_value = "EU_WEST")]
+        region: String,
+
+        /// Interface address to bind
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Enable development mode credentials
+        #[arg(long, default_value_t = false)]
+        dev: bool,
+
+        /// Explicit opt-in for binding non-loopback interface without TLS
+        #[arg(long, default_value_t = false)]
+        insecure_dev: bool,
+
+        /// Exact allowed CORS origins for separate-origin deployments
+        #[arg(long)]
+        allowed_origins: Option<String>,
+    },
+
+    /// Run comprehensive prerequisite diagnostics (versions, ports, consensus, certificates)
+    Doctor {
+        /// Optional path to kamish.toml to validate
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Output diagnostic report as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// First-run setup initializing configuration skeletons and administrator credentials
     Init {
-        /// Force overwrite of existing configuration and keys
+        /// Target directory to initialize
+        #[arg(short, long, default_value = ".")]
+        dir: String,
+
+        /// Path to secret file containing admin password
+        #[arg(short, long)]
+        secret_file: Option<String>,
+
+        /// Administrator username to provision
+        #[arg(long, default_value = "admin")]
+        admin_user: String,
+
+        /// Direct admin password (for automated non-interactive scripting)
+        #[arg(long)]
+        admin_password: Option<String>,
+
+        /// Primary cluster sovereign region
+        #[arg(short, long, default_value = "EU_WEST")]
+        region: String,
+
+        /// Force overwrite of existing configuration files
         #[arg(short, long, default_value_t = false)]
         force: bool,
     },
 
-    /// Query cluster state, authority consensus model, active leases, and quorum status
+    /// Query running cluster status, operating mode, and consensus authority model
     Status {
-        /// Target gateway endpoint address
-        #[arg(short, long, default_value = "127.0.0.1:3001")]
-        addr: String,
+        /// Target Gateway URL
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        gateway_url: String,
+
+        /// Session token (optional, auto-authenticates if omitted)
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Admin username for authentication
+        #[arg(long)]
+        username: Option<String>,
+
+        /// Admin password for authentication
+        #[arg(long)]
+        password: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 
-    /// Create and inspect sovereign topics and partition catalogs
-    #[command(subcommand)]
-    Topic(topic::TopicCommands),
+    /// Sovereign topic creation and inspection
+    Topic {
+        #[command(subcommand)]
+        cmd: TopicCommands,
+    },
 
-    /// Cryptographically sign, verify, and publish Ed25519 residency policies
-    #[command(subcommand)]
-    Policy(policy::PolicyCommands),
-
-    /// Produce a record with cryptographic residency policy enforcement
+    /// Produce a record with cryptographic residency enforcement
     Produce {
+        /// Target broker TCP address
         #[arg(short, long, default_value = "127.0.0.1:9092")]
         addr: String,
-        #[arg(short, long, default_value = "telemetry")]
+
+        /// Target topic name
+        #[arg(short, long)]
         topic: String,
-        #[arg(short, long, default_value_t = 0)]
+
+        /// Target partition number
+        #[arg(short = 'p', long, default_value_t = 0)]
         partition: u32,
+
+        /// Classification rule ID
         #[arg(short, long, default_value = "general")]
         class_id: String,
-        #[arg(short = 'v', long)]
+
+        /// Raw message payload bytes
+        #[arg(long)]
         payload: String,
+
+        /// Client home region
         #[arg(short, long, default_value = "EU_WEST")]
         region: String,
-        #[arg(long, value_enum, default_value = "strict-local")]
-        policy: kamish_ctl::PolicyChoice,
+
+        /// Residency policy enforcement choice
+        #[arg(value_enum, long, default_value = "strict-local")]
+        policy: PolicyChoice,
     },
 
-    /// Read records sequentially from a partition offset up to high watermark
+    /// Consume records from a partition beginning at an offset
     Consume {
+        /// Target broker TCP address
         #[arg(short, long, default_value = "127.0.0.1:9092")]
         addr: String,
-        #[arg(short, long, default_value = "telemetry")]
+
+        /// Target topic name
+        #[arg(short, long)]
         topic: String,
-        #[arg(short, long, default_value_t = 0)]
+
+        /// Target partition number
+        #[arg(short = 'p', long, default_value_t = 0)]
         partition: u32,
+
+        /// Client classification identity
         #[arg(short, long, default_value = "general")]
         class_id: String,
+
+        /// Offset to begin reading
         #[arg(short, long, default_value_t = 0)]
         offset: u64,
+
+        /// Maximum number of records to fetch
         #[arg(short, long, default_value_t = 10)]
         max_records: usize,
     },
 
-    /// Alias for consume: fetch records sequentially from a partition
+    /// Fetch records from a partition (alias for consume)
     Fetch {
+        /// Target broker TCP address
         #[arg(short, long, default_value = "127.0.0.1:9092")]
         addr: String,
-        #[arg(short, long, default_value = "telemetry")]
+
+        /// Target topic name
+        #[arg(short, long)]
         topic: String,
-        #[arg(short, long, default_value_t = 0)]
+
+        /// Target partition number
+        #[arg(short = 'p', long, default_value_t = 0)]
         partition: u32,
+
+        /// Client classification identity
         #[arg(short, long, default_value = "general")]
         class_id: String,
+
+        /// Offset to begin reading
         #[arg(short, long, default_value_t = 0)]
         offset: u64,
+
+        /// Maximum number of records to fetch
         #[arg(short, long, default_value_t = 10)]
         max_records: usize,
     },
 
-    /// Verify cryptographic integrity of SHA-256 hash-chained audit logs
+    /// Sovereign policy authoring, signature verification, and cluster publication
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicyCommands,
+    },
+
+    /// Verify the cryptographic integrity of a hash-chained audit log
     VerifyAudit {
+        /// Path to the audit log file
         #[arg(short, long)]
         log_path: String,
+
+        /// Optional stream ID to verify external witness anchoring
         #[arg(short, long)]
         stream: Option<String>,
+
+        /// Optional external witness public key hex
         #[arg(short, long)]
         pubkey: Option<String>,
+
+        /// Machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 
-    /// Run the Developer B 3-Scenario verification suite (Residency, Slow-Link, Outage)
-    Demo,
-
-    /// Benchmark sustained produce throughput (msg/s) and p50/p99 latency
+    /// Run real-time performance and latency benchmark across network conditions
     Benchmark {
-        #[arg(short, long, default_value_t = 1000)]
+        /// Total messages to produce
+        #[arg(short, long, default_value_t = 100)]
         count: usize,
-        #[arg(short, long)]
-        addr: Option<String>,
-        #[arg(short = 'j', long, default_value_t = 1)]
+
+        /// Producer concurrency level
+        #[arg(short = 'm', long, default_value_t = 2)]
         concurrency: usize,
     },
 
-    /// Trigger regional partition failover promotion on a candidate broker
+    /// Execute labelled scenario demonstration walkthrough
+    Demo,
+
+    /// Request partition failover promotion to a candidate owner
     Promote {
         #[arg(short, long, default_value = "127.0.0.1:9092")]
         addr: String,
-        #[arg(short, long, default_value = "telemetry")]
-        topic: String,
-        #[arg(short, long, default_value_t = 0)]
-        partition: u32,
+
         #[arg(short, long)]
-        class_id: Option<String>,
-        #[arg(long)]
-        min_watermark: Option<u64>,
+        topic: String,
+
+        #[arg(short = 'p', long, default_value_t = 0)]
+        partition: u32,
+
+        #[arg(short, long, default_value = "general")]
+        class_id: String,
+
+        #[arg(long, default_value_t = 0)]
+        min_watermark: u64,
     },
 
-    /// Query the durable replication watermark from a remote broker
+    /// Query durable replication watermark for a source region
     Watermark {
         #[arg(short, long, default_value = "127.0.0.1:9092")]
         addr: String,
-        #[arg(short, long, default_value = "telemetry")]
+
+        #[arg(short, long)]
         topic: String,
-        #[arg(short, long, default_value_t = 0)]
+
+        #[arg(short = 'p', long, default_value_t = 0)]
         partition: u32,
+
         #[arg(short, long, default_value = "EU_WEST")]
         source_region: String,
+    },
+
+    /// Generate shell auto-completion scripts
+    Completion {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TopicCommands {
+    /// Create a new sovereign topic
+    Create {
+        /// Topic identifier
+        #[arg(short, long)]
+        name: String,
+
+        /// Tenant identifier owning the topic
+        #[arg(short, long, default_value = "tenant-sovereign")]
+        tenant: String,
+
+        /// Number of sovereign partitions
+        #[arg(short = 'p', long, default_value_t = 3)]
+        partitions: usize,
+
+        /// Authorized classification classes
+        #[arg(short, long, value_delimiter = ',', default_value = "general")]
+        classes: Vec<String>,
+
+        /// Target Gateway URL
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        gateway_url: String,
+
+        /// Pre-authenticated bearer token
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Username for credentials authentication
+        #[arg(short, long)]
+        username: Option<String>,
+
+        /// Password for credentials authentication
+        #[arg(long)]
+        password: Option<String>,
+    },
+
+    /// List all registered sovereign topics
+    List {
+        /// Target Gateway URL
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        gateway_url: String,
+
+        /// Pre-authenticated bearer token
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Username for credentials authentication
+        #[arg(short, long)]
+        username: Option<String>,
+
+        /// Password for credentials authentication
+        #[arg(long)]
+        password: Option<String>,
+
+        /// Emit machine-readable JSON output
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PolicyCommands {
+    /// Sign an authoring policy JSON with an Ed25519 private key
+    Sign {
+        /// Path to policy document JSON
+        #[arg(short, long)]
+        policy: String,
+
+        /// Path to Ed25519 private key file (hex seed)
+        #[arg(short, long)]
+        key: String,
+
+        /// Optional output file for signed policy
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
+    /// Verify a signed policy against a trusted public keys file
+    Verify {
+        /// Path to signed policy JSON
+        #[arg(short, long)]
+        policy: String,
+
+        /// Path to trusted public keys file
+        #[arg(short, long)]
+        trusted_keys: String,
+    },
+
+    /// Publish and activate a signed policy on a running gateway cluster
+    Publish {
+        /// Path to signed policy JSON
+        #[arg(short, long)]
+        policy: String,
+
+        /// Target Gateway URL
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        gateway_url: String,
+        /// Pre-authenticated bearer token
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(short, long)]
+        username: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
     },
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Start(args) | Commands::Run(args) => {
-            start::run_start(args).await?;
+    let exit_code = match cli.command {
+        Commands::Start {
+            config,
+            port,
+            broker_port,
+            data_dir,
+            region,
+            host,
+            dev,
+            insecure_dev,
+            allowed_origins,
+        } => {
+            let opts = start::StartOptions {
+                config: config.as_deref(),
+                port,
+                broker_port,
+                data_dir: &data_dir,
+                region: &region,
+                host: &host,
+                dev,
+                insecure_dev,
+                allowed_origins: allowed_origins.as_deref(),
+            };
+            match start::run_start(opts).await {
+                Ok(_) => 0,
+                Err(e) => {
+                    eprintln!("Fatal error in kamish start: {e}");
+                    1
+                }
+            }
         }
-        Commands::Doctor => {
-            doctor::run_doctor().await?;
+
+        Commands::Doctor { config, json } => doctor::run_doctor(config.as_deref(), json),
+
+        Commands::Init {
+            dir,
+            secret_file,
+            admin_user,
+            admin_password,
+            region,
+            force,
+        } => {
+            let opts = init::InitOptions {
+                dir: &dir,
+                secret_file: secret_file.as_deref(),
+                admin_user: &admin_user,
+                admin_password: admin_password.as_deref(),
+                region: &region,
+                force,
+            };
+            init::run_init(opts)
         }
-        Commands::Init { force } => {
-            init::run_init(force).await?;
+
+        Commands::Status {
+            gateway_url,
+            token,
+            username,
+            password,
+            json,
+        } => {
+            let auth = status::AuthOptions {
+                token: token.as_deref(),
+                username: username.as_deref(),
+                password: password.as_deref(),
+            };
+            status::run_status(&gateway_url, auth, json).await
         }
-        Commands::Status { addr } => {
-            status::run_status(&addr).await?;
-        }
-        Commands::Topic(cmd) => {
-            topic::run_topic(cmd).await?;
-        }
-        Commands::Policy(cmd) => {
-            policy::run_policy(cmd).await?;
-        }
+
+        Commands::Topic { cmd } => match cmd {
+            TopicCommands::Create {
+                name,
+                tenant,
+                partitions,
+                classes,
+                gateway_url,
+                token,
+                username,
+                password,
+            } => {
+                let auth = status::AuthOptions {
+                    token: token.as_deref(),
+                    username: username.as_deref(),
+                    password: password.as_deref(),
+                };
+                topic::create_topic(&gateway_url, &name, &tenant, partitions, &classes, auth).await
+            }
+
+            TopicCommands::List {
+                gateway_url,
+                token,
+                username,
+                password,
+                json,
+            } => {
+                let auth = status::AuthOptions {
+                    token: token.as_deref(),
+                    username: username.as_deref(),
+                    password: password.as_deref(),
+                };
+                topic::list_topics(&gateway_url, auth, json).await
+            }
+        },
+
         Commands::Produce {
             addr,
             topic,
@@ -184,17 +521,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             region,
             policy,
         } => {
-            kamish_ctl::run_command(kamish_ctl::Commands::Produce {
-                addr,
-                topic,
-                partition,
-                class_id,
-                payload,
-                region,
-                policy,
-            })
-            .await?;
+            ctl::run_produce(
+                &addr, &topic, partition, &class_id, &payload, &region, policy,
+            )
+            .await
         }
+
         Commands::Consume {
             addr,
             topic,
@@ -210,76 +542,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             class_id,
             offset,
             max_records,
-        } => {
-            kamish_ctl::run_command(kamish_ctl::Commands::Consume {
-                addr,
-                topic,
-                partition,
-                class_id,
-                offset,
-                max_records,
-            })
-            .await?;
-        }
+        } => ctl::run_consume(&addr, &topic, partition, &class_id, offset, max_records).await,
+
+        Commands::Policy { cmd } => match cmd {
+            PolicyCommands::Sign {
+                policy,
+                key,
+                output,
+            } => policy_cmd::sign_policy(&policy, &key, output.as_deref()),
+
+            PolicyCommands::Verify {
+                policy,
+                trusted_keys,
+            } => policy_cmd::verify_policy(&policy, &trusted_keys),
+
+            PolicyCommands::Publish {
+                policy,
+                gateway_url,
+                token,
+                username,
+                password,
+            } => {
+                policy_cmd::publish_policy(
+                    &policy,
+                    &gateway_url,
+                    status::AuthOptions {
+                        token: token.as_deref(),
+                        username: username.as_deref(),
+                        password: password.as_deref(),
+                    },
+                )
+                .await
+            }
+        },
+
         Commands::VerifyAudit {
             log_path,
             stream,
             pubkey,
-        } => {
-            kamish_ctl::run_command(kamish_ctl::Commands::VerifyAudit {
-                log_path,
-                stream,
-                pubkey,
-            })
-            .await?;
-        }
-        Commands::Demo => {
-            kamish_ctl::run_command(kamish_ctl::Commands::Demo).await?;
-        }
-        Commands::Benchmark {
-            count,
-            addr,
-            concurrency,
-        } => {
-            kamish_ctl::run_command(kamish_ctl::Commands::Benchmark {
-                count,
-                addr,
-                concurrency,
-            })
-            .await?;
-        }
+            json,
+        } => ctl::run_verify_audit(&log_path, stream.as_deref(), pubkey.as_deref(), json).await,
+
+        Commands::Benchmark { count, concurrency } => ctl::run_benchmark(count, concurrency).await,
+
+        Commands::Demo => ctl::run_demo().await,
+
         Commands::Promote {
             addr,
             topic,
             partition,
             class_id,
             min_watermark,
-        } => {
-            kamish_ctl::run_command(kamish_ctl::Commands::Promote {
-                addr,
-                topic,
-                partition,
-                class_id,
-                min_watermark,
-            })
-            .await?;
-        }
+        } => ctl::run_promote(&addr, &topic, partition, &class_id, min_watermark).await,
+
         Commands::Watermark {
             addr,
             topic,
             partition,
             source_region,
-        } => {
-            kamish_ctl::run_command(kamish_ctl::Commands::Watermark {
-                addr,
-                topic,
-                partition,
-                source_region,
-            })
-            .await?;
+        } => ctl::run_watermark(&addr, &topic, partition, &source_region).await,
+
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            completion::generate_completion(shell, &mut cmd);
+            0
         }
-    }
+    };
 
-    Ok(())
+    std::process::exit(exit_code);
 }
-

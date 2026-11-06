@@ -300,7 +300,9 @@ pub async fn run_produce_workload(
     Ok(BenchResult::compute(&mut all_latencies, elapsed))
 }
 
-pub async fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn run_command(
+    command: Commands,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match command {
         Commands::VerifyAudit {
             log_path,
@@ -721,4 +723,3 @@ pub async fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
-

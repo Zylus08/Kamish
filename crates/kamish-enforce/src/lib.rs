@@ -413,6 +413,10 @@ impl Enforcer {
         }
     }
 
+    pub fn policy_cache(&self) -> Arc<RwLock<PolicyCache>> {
+        self.policy_cache.clone()
+    }
+
     pub fn audit_log(&self) -> &AuditLog {
         &self.audit_log
     }

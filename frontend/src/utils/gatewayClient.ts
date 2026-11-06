@@ -450,11 +450,11 @@ class GatewayClient {
     });
   }
 
-  public async produce(topic: string, partition: number, class_id: string, payload: string): Promise<any> {
+  public async produce(topic: string, partition: number, class_id: string, payload: string, residency_rule?: "StrictLocal" | "GlobalCleartext"): Promise<any> {
     return this.request("/api/produce", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic, partition, class_id, payload }),
+      body: JSON.stringify({ topic, partition, class_id, payload, residency_rule }),
     });
   }
 

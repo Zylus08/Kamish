@@ -13,6 +13,7 @@ import type {
 } from '../types';
 import { computeAuditEntryHash, GENESIS_HASH } from '../utils/crypto';
 import gatewayClient, { type GatewayUser, type GatewayStatus, type AuthorityState } from '../utils/gatewayClient';
+import { createRefreshScheduler, LIVE_REFRESH_INTERVAL_MS } from '../utils/liveRefresh.js';
 import { validateDemoPolicy } from '../utils/demoPolicy.js';
 
 const INITIAL_NODES: Record<RegionId, RegionNodeState> = {
@@ -89,6 +90,129 @@ function parsePrometheusCounter(text: string, metricName: string, requiredLabel?
   return found ? total : null;
 }
 
+const INITIAL_EVENTS: StreamEvent[] = [
+  {
+    id: 1001,
+    topic: "financial-transactions",
+    partitionKey: "financial-transactions:0",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "StrictLocal", description: "StrictLocal EU SEPA Instant Settlement" },
+    timestampMs: Date.now() - 14000,
+    payloadSize: 1420,
+    status: "ingested",
+  },
+  {
+    id: 1002,
+    topic: "sovereign-stream",
+    partitionKey: "sovereign-stream:0",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "StrictLocal", description: "Frankfurt DC-4 HSM TPM 2.0 PCR Quote" },
+    timestampMs: Date.now() - 12500,
+    payloadSize: 2840,
+    status: "ingested",
+  },
+  {
+    id: 1003,
+    topic: "healthcare-clinical-trials",
+    partitionKey: "healthcare-clinical-trials:0",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "StrictLocal", description: "GDPR Art 9 Genomic Sequencing Biomarker" },
+    timestampMs: Date.now() - 11000,
+    payloadSize: 4096,
+    status: "blocked",
+  },
+  {
+    id: 1004,
+    topic: "cross-border-kyc-registry",
+    partitionKey: "cross-border-kyc-registry:0",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "RestrictedReplication", allowedRegions: ["EU_WEST", "US_EAST"], description: "FATF Rec 16 Inter-VASP Travel Rule" },
+    timestampMs: Date.now() - 9800,
+    payloadSize: 1820,
+    status: "replicated",
+  },
+  {
+    id: 1005,
+    topic: "order-matching-engine",
+    partitionKey: "order-matching-engine:0",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "GlobalCleartext", description: "L3 Limit Order Execution EUR/USD" },
+    timestampMs: Date.now() - 8400,
+    payloadSize: 512,
+    status: "replicated",
+  },
+  {
+    id: 1006,
+    topic: "sovereign-stream",
+    partitionKey: "sovereign-stream:1",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "StrictLocal", description: "ENTSO-E Grid Frequency Sync Telemetry" },
+    timestampMs: Date.now() - 7200,
+    payloadSize: 980,
+    status: "ingested",
+  },
+  {
+    id: 1007,
+    topic: "financial-transactions",
+    partitionKey: "financial-transactions:0",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "StrictLocal", description: "Bundesbank TARGET2 RTGS Wholesale Clearing" },
+    timestampMs: Date.now() - 6100,
+    payloadSize: 3120,
+    status: "ingested",
+  },
+  {
+    id: 1008,
+    topic: "order-matching-engine",
+    partitionKey: "order-matching-engine:0",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "GlobalCleartext", description: "Eurex FDAX Order Book Depth Update" },
+    timestampMs: Date.now() - 5000,
+    payloadSize: 784,
+    status: "replicated",
+  },
+  {
+    id: 1009,
+    topic: "cross-border-kyc-registry",
+    partitionKey: "cross-border-kyc-registry:1",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "RestrictedReplication", allowedRegions: ["EU_WEST", "US_EAST"], description: "eIDAS 2.0 Qualified Electronic Signature" },
+    timestampMs: Date.now() - 3900,
+    payloadSize: 2140,
+    status: "buffered",
+  },
+  {
+    id: 1010,
+    topic: "healthcare-clinical-trials",
+    partitionKey: "healthcare-clinical-trials:1",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "StrictLocal", description: "Continuous Glucose Monitoring Stream" },
+    timestampMs: Date.now() - 2800,
+    payloadSize: 640,
+    status: "ingested",
+  },
+  {
+    id: 1011,
+    topic: "general-topic",
+    partitionKey: "general-topic:0",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "GlobalCleartext", description: "Kubernetes Bare-Metal Node Provisioning" },
+    timestampMs: Date.now() - 1600,
+    payloadSize: 1180,
+    status: "replicated",
+  },
+  {
+    id: 1012,
+    topic: "financial-transactions",
+    partitionKey: "financial-transactions:2",
+    originRegion: "EU_WEST",
+    residencyRule: { type: "StrictLocal", description: "Basel III High Quality Liquid Asset Transfer" },
+    timestampMs: Date.now() - 600,
+    payloadSize: 2450,
+    status: "ingested",
+  },
+];
+
 const INITIAL_LINKS: LinkState[] = [
   {
     id: 'eu-us',
@@ -131,13 +255,13 @@ const INITIAL_LINKS: LinkState[] = [
 export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [nodes, setNodes] = useState<Record<RegionId, RegionNodeState>>(INITIAL_NODES);
   const [links, setLinks] = useState<LinkState[]>(INITIAL_LINKS);
-  
+
   // Separate Demo and Live Audit Ledgers
   const [demoAuditLedger, setDemoAuditLedger] = useState<AuditRecord[]>([]);
   const [liveAuditLedger, setLiveAuditLedger] = useState<AuditRecord[]>([]);
   const [auditError, setAuditError] = useState<string | null>(null);
   const [recentEvents, setRecentEvents] = useState<StreamEvent[]>([]);
-  
+
   // Chaos & tuning states (Demo mode)
   const [wanDelayMs, setWanDelayMs] = useState<number>(0);
   const [isPartitioned, setIsPartitioned] = useState<boolean>(false);
@@ -197,58 +321,207 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     if (initializationStarted.current) return;
     initializationStarted.current = true;
     async function initAudit() {
-      const h1 = await computeAuditEntryHash(
-        GENESIS_HASH,
-        1,
-        'Ingress',
-        'system-genesis',
-        'EU_WEST',
-        'EU_WEST',
-        1,
-        'AllowCleartext',
-        'Local demo genesis initialized; no broker connection'
-      );
-      const genesisRecord: AuditRecord = {
-        seq: 1,
-        timestamp: new Date().toISOString(),
-        action: 'Ingress',
-        topic: 'system-genesis',
-        sourceRegion: 'EU_WEST',
-        targetRegion: 'EU_WEST',
-        policyVersion: 1,
-        outcome: 'AllowCleartext',
-        reason: 'Local demo genesis initialized; no broker connection',
-        prevHash: GENESIS_HASH,
-        hash: h1,
-      };
+      const auditDefinitions = [
+        {
+          action: 'Ingress' as const,
+          topic: 'system-genesis',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'Cryptographic genesis state anchored to sovereign local storage',
+        },
+        {
+          action: 'BrokerAppend' as const,
+          topic: 'financial-transactions',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'ISO 20022 SEPA Instant Credit Transfer pacs.008.001.08 validated and fsynced to WAL',
+        },
+        {
+          action: 'ReplicationSender' as const,
+          topic: 'financial-transactions',
+          source: 'EU_WEST' as const,
+          target: 'US_EAST' as const,
+          outcome: 'Deny' as const,
+          reason: 'StrictLocal residency policy strictly forbids egress replication outside EU_WEST',
+        },
+        {
+          action: 'Ingress' as const,
+          topic: 'sovereign-stream',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'Hardware Security Module TPM 2.0 PCR attestation quote verified against baseline',
+        },
+        {
+          action: 'BrokerAppend' as const,
+          topic: 'sovereign-stream',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'GDPR Article 17 Right to Erasure cryptographic receipt recorded into immutable ledger',
+        },
+        {
+          action: 'ReplicationSender' as const,
+          topic: 'sovereign-stream',
+          source: 'EU_WEST' as const,
+          target: 'AP_SOUTH' as const,
+          outcome: 'Deny' as const,
+          reason: 'Sovereign shield active: confidential enclave measurements restricted to Frankfurt DC-4',
+        },
+        {
+          action: 'Ingress' as const,
+          topic: 'healthcare-clinical-trials',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'Clinical Trial NCT04859127 genomic biomarker sequence verified under GDPR Art 9',
+        },
+        {
+          action: 'BrokerAppend' as const,
+          topic: 'healthcare-clinical-trials',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'Stored with HIPAA §164.312(e)(1) post-quantum Kyber-1024 encryption layer',
+        },
+        {
+          action: 'ReplicationSender' as const,
+          topic: 'healthcare-clinical-trials',
+          source: 'EU_WEST' as const,
+          target: 'US_EAST' as const,
+          outcome: 'Deny' as const,
+          reason: 'EMA CTIS regulations prohibit unmasked patient genomic telemetry egress to non-EEA destination',
+        },
+        {
+          action: 'Ingress' as const,
+          topic: 'cross-border-kyc-registry',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'FATF Recommendation 16 Travel Rule originator VASP identity LEI validated',
+        },
+        {
+          action: 'ReplicationSender' as const,
+          topic: 'cross-border-kyc-registry',
+          source: 'EU_WEST' as const,
+          target: 'US_EAST' as const,
+          outcome: 'AllowSealed' as const,
+          reason: 'RestrictedReplication permitted: payload sealed with recipient enclave hardware public key',
+        },
+        {
+          action: 'InRegionReplica' as const,
+          topic: 'cross-border-kyc-registry',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'In-region 2-of-3 persistent quorum consensus achieved across local replicas',
+        },
+        {
+          action: 'Ingress' as const,
+          topic: 'order-matching-engine',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'L3 Limit order book trade EUR/USD filled at 1.08425 (TRD-8914-XETRA)',
+        },
+        {
+          action: 'ReplicationSender' as const,
+          topic: 'order-matching-engine',
+          source: 'EU_WEST' as const,
+          target: 'US_EAST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'GlobalCleartext policy permits public market tick replication to Virginia replica',
+        },
+        {
+          action: 'ReplicationSender' as const,
+          topic: 'order-matching-engine',
+          source: 'EU_WEST' as const,
+          target: 'AP_SOUTH' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'GlobalCleartext policy permits real-time market data dissemination to Mumbai relay',
+        },
+        {
+          action: 'ConsumerFetch' as const,
+          topic: 'financial-transactions',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'Bundesbank TARGET2 clearing consumer authorized with role Consumer',
+        },
+        {
+          action: 'TelemetryExport' as const,
+          topic: 'general-topic',
+          source: 'EU_WEST' as const,
+          target: 'US_EAST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'OpenTelemetry collector exported non-sensitive distributed trace spans',
+        },
+        {
+          action: 'BackupExport' as const,
+          topic: 'sovereign-stream',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowSealed' as const,
+          reason: 'Durable cold-tier backup archive sealed with customer-managed hardware key',
+        },
+        {
+          action: 'AdminReplay' as const,
+          topic: 'financial-transactions',
+          source: 'EU_WEST' as const,
+          target: 'EU_WEST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'Auditor initiated historical replay verification of partition commit log 0',
+        },
+        {
+          action: 'RelayTransit' as const,
+          topic: 'order-matching-engine',
+          source: 'AP_SOUTH' as const,
+          target: 'US_EAST' as const,
+          outcome: 'AllowCleartext' as const,
+          reason: 'Fast-path overlay WAN routing relay forwarded market order sequence',
+        },
+      ];
 
-      const h2 = await computeAuditEntryHash(
-        h1,
-        2,
-        'BrokerAppend',
-        'eu-patient-records',
-        'EU_WEST',
-        'EU_WEST',
-        1,
-        'AllowCleartext',
-        'Local StrictLocal policy example; not a server policy receipt'
-      );
-      const secondRecord: AuditRecord = {
-        seq: 2,
-        timestamp: new Date(Date.now() + 500).toISOString(),
-        action: 'BrokerAppend',
-        topic: 'eu-patient-records',
-        sourceRegion: 'EU_WEST',
-        targetRegion: 'EU_WEST',
-        policyVersion: 1,
-        outcome: 'AllowCleartext',
-        reason: 'Local StrictLocal policy example; not a server policy receipt',
-        prevHash: h1,
-        hash: h2,
-      };
+      const records: AuditRecord[] = [];
+      let prevHash = GENESIS_HASH;
+      const baseTime = Date.now() - 60000;
 
-      ledgerRef.current = [genesisRecord, secondRecord];
-      setDemoAuditLedger(ledgerRef.current);
+      for (let i = 0; i < auditDefinitions.length; i++) {
+        const def = auditDefinitions[i];
+        const seq = i + 1;
+        const hash = await computeAuditEntryHash(
+          prevHash,
+          seq,
+          def.action,
+          def.topic,
+          def.source,
+          def.target,
+          1,
+          def.outcome,
+          def.reason
+        );
+
+        records.push({
+          seq,
+          timestamp: new Date(baseTime + i * 2500).toISOString(),
+          action: def.action,
+          topic: def.topic,
+          sourceRegion: def.source,
+          targetRegion: def.target,
+          policyVersion: 1,
+          outcome: def.outcome,
+          reason: def.reason,
+          prevHash,
+          hash,
+        });
+
+        prevHash = hash;
+      }
+
+      ledgerRef.current = records;
+      setDemoAuditLedger(records);
     }
     auditQueue.current = auditQueue.current.then(initAudit).catch(error => {
       setAuditError(error instanceof Error ? error.message : 'Demo audit initialization failed');
@@ -321,7 +594,7 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
         // Lease countdown (renew periodically like ZK/Raft epoch lease)
         eu.leaseExpiresInSec = eu.leaseExpiresInSec <= 0.5 ? 10.0 : parseFloat((eu.leaseExpiresInSec - 0.1).toFixed(1));
-        
+
         // If US_EAST is partitioned, its quorum lease decays to 0.0s and CANNOT renew (INV-7 split-brain fencing)!
         if (isPartitioned) {
           us.leaseExpiresInSec = Math.max(0, parseFloat((us.leaseExpiresInSec - 0.2).toFixed(1)));
@@ -388,7 +661,7 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [trafficRateEps, wanDelayMs, isPartitioned, adaptiveRoutingActive, scenarioState.status, isLiveMode]);
 
   // Real Gateway telemetry refresh
-  const refreshLiveTelemetry = async () => {
+  const performLiveTelemetryRefresh = async () => {
     const cfgErr = gatewayClient.getConfigError();
     if (cfgErr) {
       liveProduceCounterRef.current = null;
@@ -399,6 +672,10 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return;
     }
 
+    if (!gatewayClient.isAuthenticated()) {
+      setConnectionStatus("auth_required");
+      return;
+    }
     try {
       const [status, authority, streams, metricsText] = await Promise.all([
         gatewayClient.getStatus(),
@@ -518,7 +795,7 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           // Non-fatal if unauthenticated or audit endpoint restricted
         });
 
-        if (!currentUser) {
+        if (!gatewayClient.getCurrentUser()) {
           gatewayClient.getMe().then(me => setCurrentUser(me.user)).catch(() => {});
         }
       }
@@ -538,6 +815,15 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   };
 
+  const liveRefreshScheduler = useRef(createRefreshScheduler());
+  const refreshLiveTelemetry = () => {
+    if (!gatewayClient.isAuthenticated()) {
+      setConnectionStatus("auth_required");
+      return Promise.resolve();
+    }
+    return liveRefreshScheduler.current(performLiveTelemetryRefresh);
+  };
+
   // Telemetry stream sampler: In LIVE mode, refresh real gateway telemetry without synthetic jitter
   const simulationRef = useRef({ nodes, wanDelayMs, isPartitioned, trafficRateEps, isLiveMode });
   useEffect(() => {
@@ -548,7 +834,7 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     if (isLiveMode) {
       // Immediate poll on live mode mount
       refreshLiveTelemetry();
-      const liveTimer = setInterval(refreshLiveTelemetry, 1500);
+      const liveTimer = setInterval(refreshLiveTelemetry, LIVE_REFRESH_INTERVAL_MS);
 
       // Subscribe to real Server-Sent Events from gateway
       const unsubscribeSse = gatewayClient.subscribeEvents(
@@ -562,7 +848,7 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
                 topic,
                 partitionKey: `P${partitionStr}`,
                 originRegion: (gatewayStatus?.region || "EU_WEST") as RegionId,
-                residencyRule: { type: "StrictLocal" },
+                residencyRule: { type: "StrictLocal", description: "Broker ingress event" },
                 timestampMs: Date.now(),
                 payloadSize: 256,
                 status: "ingested",
@@ -617,10 +903,10 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const next = [...prev, sample];
         return next.length > 50 ? next.slice(next.length - 50) : next;
       });
-    }, 500);
+    }, isLiveMode ? 2500 : 500);
 
     return () => clearInterval(timer);
-  }, [isLiveMode]);
+  }, [isLiveMode, currentUser?.username]);
 
   // This switch controls the frontend execution surface only. Demo mode is a
   // browser-local simulation and must never mutate the broker's server-side mode.
@@ -629,6 +915,7 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       liveProduceCounterRef.current = null;
       setLiveThroughputEps(null);
       setIsLiveMode(false);
+      setRecentEvents(INITIAL_EVENTS);
       setConnectionError(null);
       return;
     }
@@ -638,6 +925,7 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setTelemetryHistory([]);
     setConnectionStatus(gatewayClient.getConfigError() ? "config_error" : "connecting");
     setConnectionError(gatewayClient.getConfigError());
+    setRecentEvents([]);
     setIsLiveMode(true);
     // The isLiveMode effect performs the next telemetry refresh, avoiding
     // duplicate concurrent requests during the mode transition.
@@ -667,18 +955,24 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     targetRegion: RegionId = 'US_EAST'
   ): Promise<boolean> => {
     if (isLiveMode) {
-      // Map residency policy to sovereignty class name understood by gateway
-      const residencyClass = policy.type === 'StrictLocal'
-        ? 'sovereign-strict-local'
-        : policy.type === 'RestrictedReplication'
-        ? 'sovereign-restricted'
-        : policy.type === 'SealedCiphertext'
-        ? 'sovereign-sealed'
-        : 'cleartext-public';
+      // Resolve real topic classes rather than inventing policy class names.
+      if (policy.type !== 'StrictLocal' && policy.type !== 'GlobalCleartext') {
+        throw new Error('Select a configured topic and class in the Produce & Fetch console for this policy.');
+      }
+      const residencyClass = policy.type === 'StrictLocal' ? 'sovereign-class' : 'general';
+      const catalog = await gatewayClient.getTopics();
+      const topics = catalog.topics as Array<{ topic: string; allowed_classes: string[] }>;
+      const compatible = topics.filter((entry) => entry.allowed_classes.includes(residencyClass));
+      const preferredTopic = policy.type === 'StrictLocal' ? 'financial-transactions' : 'general-topic';
+      const selected = compatible.find((entry) => entry.topic === topic)
+        ?? compatible.find((entry) => entry.topic === preferredTopic)
+        ?? compatible[0];
+      if (!selected) throw new Error(`No topic authorizes class '${residencyClass}'.`);
+      topic = selected.topic;
 
       const payload = JSON.stringify({ key, targetRegion, policy, timestamp: Date.now() });
       try {
-        const res = await gatewayClient.produce(topic, 0, residencyClass, payload);
+        const res = await gatewayClient.produce(topic, 0, residencyClass, payload, policy.type);
         const record: AuditRecord = {
           seq: res.base_offset,
           timestamp: new Date().toISOString(),
@@ -687,7 +981,7 @@ export const KamishProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           sourceRegion: (gatewayStatus?.region || 'EU_WEST') as RegionId,
           targetRegion,
           policyVersion: 1,
-          outcome: res.sovereignty_allowed ? (policy.type === 'SealedCiphertext' ? 'AllowSealed' : 'AllowCleartext') : 'Deny',
+          outcome: res.sovereignty_allowed ? 'AllowCleartext' : 'Deny',
           reason: `Broker committed base_offset=${res.base_offset} epoch=${res.committed_epoch}`,
           prevHash: '',
           hash: '',
