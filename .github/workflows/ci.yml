@@ -124,6 +124,9 @@ jobs:
           mkdir -p packages/kamish-linux-x64/bin
           cp target/release/kamish packages/kamish-linux-x64/bin/kamish
 
+      - name: Install SDK build dependencies
+        run: npm --prefix packages/kamish-client ci
+
       - name: Pack Tarballs
         run: |
           mkdir -p /tmp/kamish_cleanroom

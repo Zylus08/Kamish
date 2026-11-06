@@ -47,6 +47,9 @@ jobs:
           sha256sum packages/kamish-linux-x64/bin/kamish > dist/checksums/SHA256SUMS-binaries.txt
           cat dist/checksums/SHA256SUMS-binaries.txt
 
+      - name: Install SDK build dependencies
+        run: npm --prefix packages/kamish-client ci
+
       - name: Dry-Run npm Publish (Client SDK)
         run: |
           cd packages/kamish-client

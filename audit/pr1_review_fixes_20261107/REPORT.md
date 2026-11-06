@@ -71,3 +71,8 @@ authenticated status/topic list, TCP produce/fetch, audit verification after shu
 and uninstall. Windows/macOS portable package simulations passed as well. The
 clean-room test now invokes the pinned TypeScript compiler correctly and no longer
 kills unrelated `kamish start` processes globally.
+
+After merge, hosted packaging confirmed that the SDK prepack step also needs its
+own dependencies installed in that job (the SDK quality job has a separate runner).
+Both packaging workflows now run `npm --prefix packages/kamish-client ci` before
+packing/publish dry runs. Local clean-room validation used these build dependencies.
