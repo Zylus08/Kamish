@@ -721,3 +721,4 @@ pub async fn run_command(command: Commands) -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
+

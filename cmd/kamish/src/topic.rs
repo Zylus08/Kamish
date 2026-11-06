@@ -131,3 +131,4 @@ pub async fn run_topic(cmd: TopicCommands) -> Result<(), Box<dyn std::error::Err
     }
     Ok(())
 }
+

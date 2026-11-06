@@ -76,3 +76,4 @@ pub async fn run_status(target: &str) -> Result<(), Box<dyn std::error::Error + 
     println!("\n\x1b[1;32m✓ Status query completed.\x1b[0m\n");
     Ok(())
 }
+
