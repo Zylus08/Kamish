@@ -53,3 +53,9 @@ A subsequent Ubuntu run exposed a second scheduling-sensitive test: the agent
 retry test assumed durable replication completed after a fixed 150 ms sleep.
 It now waits for the actual durable watermark with a five-second bound and retains
 its payload/record assertions. The targeted regression passes locally.
+
+Windows then exposed three promotion fixtures that expired their 100/150 ms owner
+lease while staging fsynced records. These fixtures now stage under a valid lease
+and explicitly expire the in-memory test grant before promotion. All nine promotion
+and quarantine tests and their strict Clippy check pass locally; production lease
+or fencing behavior was not relaxed.
