@@ -48,3 +48,8 @@ GitGuardian incident 39376497 concerns the synthetic `patient_identifier_token`
 fixture in commit `8745636`, not a credential. The head uses an obvious demo identifier.
 The external scanner continues to report the historical occurrence; history was
 not rewritten and the scanner was not disabled.
+
+A subsequent Ubuntu run exposed a second scheduling-sensitive test: the agent
+retry test assumed durable replication completed after a fixed 150 ms sleep.
+It now waits for the actual durable watermark with a five-second bound and retains
+its payload/record assertions. The targeted regression passes locally.

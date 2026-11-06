@@ -1528,11 +1528,18 @@ mod tests {
         // Spawn retry worker
         let worker_handle = agent.clone().spawn_retry_worker().await.unwrap();
 
-        // Allow retry worker to process the task
-        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        // Wait for the actual completion condition rather than assuming a
+        // shared CI runner schedules and fsyncs the task within 150 ms.
+        let outbox = broker_a.get_outbox("region-us").unwrap();
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            while outbox.durable_watermark() != 1 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Retry worker did not durably replicate within 5 seconds");
 
         // Verify watermark advanced to 1 and records exist in broker B
-        let outbox = broker_a.get_outbox("region-us").unwrap();
         assert_eq!(outbox.durable_watermark(), 1);
 
         let fetch = broker_b
