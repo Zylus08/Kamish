@@ -35,6 +35,7 @@ pub struct GatewayState {
     pub rate_limiter: Arc<RateLimiter>,
     pub event_tx: broadcast::Sender<String>,
     pub demo_mode_enabled: Arc<RwLock<bool>>,
+    pub allowed_origins: Arc<Vec<String>>,
 }
 
 impl GatewayState {
@@ -47,6 +48,7 @@ impl GatewayState {
             rate_limiter: Arc::new(RateLimiter::new(120, Duration::from_secs(60))), // 120 req/min
             event_tx,
             demo_mode_enabled: Arc::new(RwLock::new(false)),
+            allowed_origins: Arc::new(Vec::new()),
         }
     }
 
@@ -59,7 +61,142 @@ impl GatewayState {
             rate_limiter: Arc::new(RateLimiter::new(120, Duration::from_secs(60))),
             event_tx,
             demo_mode_enabled: Arc::new(RwLock::new(false)),
+            allowed_origins: Arc::new(Vec::new()),
         }
+    }
+
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = Arc::new(origins);
+        self
+    }
+}
+
+/// Asset URLs must contain only relative normal components. Reject encoded
+/// separators/dot segments too; asset filenames never require percent escapes.
+pub fn safe_asset_path(path: &str) -> bool {
+    !path.contains(['%', '\\'])
+        && std::path::Path::new(path)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
+/// Canonical containment also prevents symlink escapes from an asset directory.
+pub fn contained_asset_file(
+    root: &std::path::Path,
+    candidate: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let root = root.canonicalize().ok()?;
+    let candidate = candidate.canonicalize().ok()?;
+    (candidate.starts_with(&root) && candidate.is_file()).then_some(candidate)
+}
+
+/// Serves static dashboard assets from `frontend/dist` with SPA routing and security caching.
+async fn static_dist_fallback_handler(uri: axum::http::Uri) -> Response {
+    let raw_path = uri.path();
+    if raw_path.starts_with("/api/") {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "API endpoint not found",
+                "path": raw_path
+            })),
+        )
+            .into_response();
+    }
+
+    // Locate dist directory
+    let dist_dir = if let Ok(val) = std::env::var("KAMISH_DIST_DIR") {
+        std::path::PathBuf::from(val)
+    } else if std::path::Path::new("frontend/dist").is_dir() {
+        std::path::PathBuf::from("frontend/dist")
+    } else if std::path::Path::new("../frontend/dist").is_dir() {
+        std::path::PathBuf::from("../frontend/dist")
+    } else if let Ok(exe) = std::env::current_exe() {
+        let exe_dir = exe.parent().unwrap_or(std::path::Path::new("."));
+        if exe_dir.join("../frontend/dist").is_dir() {
+            exe_dir.join("../frontend/dist")
+        } else if exe_dir.join("dist").is_dir() {
+            exe_dir.join("dist")
+        } else {
+            std::path::PathBuf::from("frontend/dist")
+        }
+    } else {
+        std::path::PathBuf::from("frontend/dist")
+    };
+
+    let subpath = raw_path.trim_start_matches('/');
+    if !safe_asset_path(subpath) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let target_file = if subpath.is_empty() {
+        dist_dir.join("index.html")
+    } else {
+        let candidate = dist_dir.join(subpath);
+        if candidate.is_file() {
+            candidate
+        } else if std::path::Path::new(subpath).extension().is_some() {
+            return StatusCode::NOT_FOUND.into_response();
+        } else {
+            // SPA fallback: client-side routes like /topics, /audit, /telemetry serve index.html
+            dist_dir.join("index.html")
+        }
+    };
+
+    if target_file.is_file() {
+        let Some(target_file) = contained_asset_file(&dist_dir, &target_file) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        match tokio::fs::read(&target_file).await {
+            Ok(bytes) => {
+                let ext = target_file
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let content_type = match ext.to_lowercase().as_str() {
+                    "html" => "text/html; charset=utf-8",
+                    "js" | "mjs" => "application/javascript; charset=utf-8",
+                    "css" => "text/css; charset=utf-8",
+                    "svg" => "image/svg+xml",
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "wasm" => "application/wasm",
+                    "json" => "application/json",
+                    "gltf" => "model/gltf+json",
+                    "bin" | "glb" => "application/octet-stream",
+                    "woff2" => "font/woff2",
+                    "txt" => "text/plain; charset=utf-8",
+                    _ => "application/octet-stream",
+                };
+
+                let cache_control = if raw_path.starts_with("/assets/") {
+                    "public, max-age=31536000, immutable"
+                } else {
+                    "no-cache"
+                };
+
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", content_type)
+                    .header("cache-control", cache_control)
+                    .body(axum::body::Body::from(bytes))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            }
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    } else {
+        let html = r#"<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Kamish Gateway</title><style>body{background:#090414;color:#f8fafc;font-family:sans-serif;padding:3rem;text-align:center}h1{color:#38bdf8}code{background:#1e1b4b;padding:0.2rem 0.5rem;border-radius:4px}</style></head>
+<body>
+<h1>Kamish Unified Gateway & Broker</h1>
+<p>REST & SSE APIs are operational at <code>/api/*</code> and metrics at <code>/metrics</code>.</p>
+<p>To serve the full web dashboard, compile frontend assets with: <code>cd frontend && npm run build</code></p>
+</body></html>"#;
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/html; charset=utf-8")
+            .body(axum::body::Body::from(html))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     }
 }
 
@@ -101,6 +238,7 @@ pub fn app(state: GatewayState) -> Router {
         .route("/api/mode", get(get_mode_handler).post(set_mode_handler))
         // Server-Sent Events
         .route("/api/events", get(events_handler))
+        .fallback(static_dist_fallback_handler)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             security_middleware,
@@ -112,7 +250,12 @@ pub fn app(state: GatewayState) -> Router {
 // Security Middleware (Rate Limiting, CSRF, Session Cookie Extraction)
 // ---------------------------------------------------------------------------
 
-fn apply_security_headers(headers: &mut HeaderMap, req_origin: Option<&str>, is_https: bool) {
+fn apply_security_headers(
+    headers: &mut HeaderMap,
+    req_origin: Option<&str>,
+    allowed_origins: &[String],
+    is_https: bool,
+) {
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     headers.insert("x-frame-options", "DENY".parse().unwrap());
     headers.insert(
@@ -127,22 +270,32 @@ fn apply_security_headers(headers: &mut HeaderMap, req_origin: Option<&str>, is_
                 .unwrap(),
         );
     }
-    let origin_val = match req_origin {
-        Some(o) if o.starts_with("http://localhost:") || o.starts_with("http://127.0.0.1:") => o,
-        _ => "http://localhost:5173",
-    };
-    if let Ok(val) = origin_val.parse() {
+
+    // CORS is granted only to exact, explicitly configured origins. Local
+    // development should use the Vite same-origin proxy; direct-origin dev
+    // setups must opt in via --allowed-origins / KAMISH_GATEWAY_ALLOWED_ORIGINS.
+    let is_allowed = req_origin.is_some_and(|origin| {
+        allowed_origins
+            .iter()
+            .any(|allowed| allowed.trim() == origin)
+    });
+
+    if is_allowed
+        && let Some(o) = req_origin
+        && let Ok(val) = o.parse()
+    {
         headers.insert("access-control-allow-origin", val);
+        headers.insert("access-control-allow-credentials", "true".parse().unwrap());
+        headers.insert(
+            "access-control-allow-headers",
+            "content-type, authorization, x-csrf-token".parse().unwrap(),
+        );
+        headers.insert(
+            "access-control-allow-methods",
+            "GET, POST, PUT, DELETE, OPTIONS".parse().unwrap(),
+        );
+        headers.append("vary", "Origin".parse().unwrap());
     }
-    headers.insert("access-control-allow-credentials", "true".parse().unwrap());
-    headers.insert(
-        "access-control-allow-headers",
-        "content-type, authorization, x-csrf-token, x-requested-with, accept, *".parse().unwrap(),
-    );
-    headers.insert(
-        "access-control-allow-methods",
-        "GET, POST, PUT, DELETE, OPTIONS".parse().unwrap(),
-    );
 }
 
 async fn security_middleware(
@@ -168,11 +321,8 @@ async fn security_middleware(
         .unwrap_or("127.0.0.1")
         .to_string();
 
-    // 1. Sliding-window rate limit (bypassed for dev frontend origin http://localhost:5173)
-    let is_dev_frontend = origin_opt
-        .as_deref()
-        .is_some_and(|o| o.starts_with("http://localhost:") || o.starts_with("http://127.0.0.1:"));
-    if !is_dev_frontend && !state.rate_limiter.check_and_record(&client_ip) {
+    // 1. Sliding-window rate limit
+    if !state.rate_limiter.check_and_record(&client_ip) {
         let mut resp = (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
@@ -180,7 +330,12 @@ async fn security_middleware(
             })),
         )
             .into_response();
-        apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), is_https);
+        apply_security_headers(
+            resp.headers_mut(),
+            origin_opt.as_deref(),
+            &state.allowed_origins,
+            is_https,
+        );
         return Ok(resp);
     }
 
@@ -189,19 +344,42 @@ async fn security_middleware(
 
     if method == Method::OPTIONS {
         let mut resp = StatusCode::NO_CONTENT.into_response();
-        apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), is_https);
+        apply_security_headers(
+            resp.headers_mut(),
+            origin_opt.as_deref(),
+            &state.allowed_origins,
+            is_https,
+        );
         return Ok(resp);
     }
 
-    // Public endpoints that do not require authentication
+    // Public endpoints that do not require authentication: static web assets, login, and prometheus metrics
     if !path.starts_with("/api/") || path == "/api/auth/login" || path == "/metrics" {
         let mut resp = next.run(req).await;
-        apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), is_https);
+        apply_security_headers(
+            resp.headers_mut(),
+            origin_opt.as_deref(),
+            &state.allowed_origins,
+            is_https,
+        );
         return Ok(resp);
     }
 
     // 2. Authentication Enforcement for all protected API endpoints
-    let token = extract_token_from_headers(req.headers());
+    let token = extract_token_from_headers(req.headers()).or_else(|| {
+        if path == "/api/events" {
+            req.uri().query().and_then(|q| {
+                for pair in q.split('&') {
+                    if let Some(tok) = pair.strip_prefix("token=") {
+                        return Some(tok.to_string());
+                    }
+                }
+                None
+            })
+        } else {
+            None
+        }
+    });
     let session = match token
         .as_deref()
         .and_then(|tok| state.session_store.validate_session(tok))
@@ -215,7 +393,12 @@ async fn security_middleware(
                 })),
             )
                 .into_response();
-            apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), is_https);
+            apply_security_headers(
+                resp.headers_mut(),
+                origin_opt.as_deref(),
+                &state.allowed_origins,
+                is_https,
+            );
             return Ok(resp);
         }
     };
@@ -234,7 +417,12 @@ async fn security_middleware(
                 })),
             )
                 .into_response();
-            apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), is_https);
+            apply_security_headers(
+                resp.headers_mut(),
+                origin_opt.as_deref(),
+                &state.allowed_origins,
+                is_https,
+            );
             return Ok(resp);
         }
     }
@@ -261,13 +449,23 @@ async fn security_middleware(
             })),
         )
             .into_response();
-        apply_security_headers(resp.headers_mut(), origin_opt.as_deref(), is_https);
+        apply_security_headers(
+            resp.headers_mut(),
+            origin_opt.as_deref(),
+            &state.allowed_origins,
+            is_https,
+        );
         return Ok(resp);
     }
 
     req.extensions_mut().insert(session);
     let mut response = next.run(req).await;
-    apply_security_headers(response.headers_mut(), origin_opt.as_deref(), is_https);
+    apply_security_headers(
+        response.headers_mut(),
+        origin_opt.as_deref(),
+        &state.allowed_origins,
+        is_https,
+    );
     Ok(response)
 }
 
@@ -632,25 +830,42 @@ async fn policy_handler(State(state): State<GatewayState>) -> Json<serde_json::V
 }
 
 #[derive(Deserialize)]
-struct PublishPolicyRequest {
-    policy_version: u64,
+#[serde(untagged)]
+enum PublishPolicyRequest {
+    Signed(Box<kamish_policy::SignedPolicy>),
+    Floor { policy_version: u64 },
 }
 
 async fn publish_policy_handler(
     State(state): State<GatewayState>,
     Json(payload): Json<PublishPolicyRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let bad_request = |error: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error})),
+        )
+    };
+    let policy_cache = state.broker.enforcer.policy_cache();
+    let mut cache = policy_cache.write().unwrap();
+    let mut next = cache.clone();
+    let version = match payload {
+        PublishPolicyRequest::Signed(signed) => {
+            let version = signed.policy.version;
+            next.update(*signed, chrono::Utc::now().timestamp())
+                .map_err(|error| bad_request(error.to_string()))?;
+            version
+        }
+        PublishPolicyRequest::Floor { policy_version } => policy_version,
+    };
     let cluster_id = format!("cluster-{}", state.broker.region);
     let new_floor = state
         .broker
         .meta
-        .advance_policy_floor(&cluster_id, payload.policy_version)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+        .advance_policy_floor(&cluster_id, version)
+        .map_err(|error| bad_request(error.to_string()))?;
+    next.set_version_floor(new_floor);
+    *cache = next;
 
     let _ = state.event_tx.send(format!(
         "POLICY_UPDATE: version floor bumped to {}",
@@ -969,6 +1184,8 @@ fn default_max_records() -> usize {
 #[derive(Deserialize)]
 struct CreateTopicRequest {
     topic: String,
+    #[serde(default)]
+    tenant_id: Option<String>,
     #[serde(default = "default_partition_count")]
     partition_count: u32,
     #[serde(default = "default_general_class")]
@@ -983,17 +1200,14 @@ async fn create_topic_handler(
     {
         let mut classes = HashSet::new();
         classes.insert(payload.class_id.clone());
-        let owner = if session.tenant_id.is_empty() {
+        let owner = if session.role.is_admin() && payload.tenant_id.is_some() {
+            payload.tenant_id.clone().unwrap()
+        } else if session.tenant_id.is_empty() {
             "tenant-default".to_string()
         } else {
             session.tenant_id.clone()
         };
-        let meta = TopicMetadata::new(
-            &payload.topic,
-            owner,
-            payload.partition_count,
-            classes,
-        );
+        let meta = TopicMetadata::new(&payload.topic, owner, payload.partition_count, classes);
 
         let mut catalog = state.broker.catalog.write().unwrap();
         catalog.register_topic(meta);
@@ -1022,6 +1236,8 @@ struct ProduceMessageRequest {
     #[serde(default = "default_general_class")]
     class_id: String,
     payload: String,
+    #[serde(default)]
+    residency_rule: Option<kamish_meta::ResidencyPolicy>,
 }
 
 async fn produce_handler(
@@ -1037,7 +1253,7 @@ async fn produce_handler(
         sequence_base: 0,
         class_id: payload.class_id.clone(),
         payload: payload.payload.into_bytes(),
-        residency_rule: None,
+        residency_rule: payload.residency_rule,
     };
 
     let client_identity = kamish_broker::tls::ClientIdentity::new(

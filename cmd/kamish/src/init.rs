@@ -155,7 +155,7 @@ pub fn run_init(opts: InitOptions) -> i32 {
         r#"# Kamish Sovereign Event Streaming Daemon Configuration
 
 [cluster]
-region = "{region}"
+region = {region}
 data_dir = "./data/kamish"
 peers = ["US_EAST", "AP_SOUTH"]
 
@@ -167,17 +167,17 @@ ack_level = "LeaderFsync"
 [gateway]
 port = 3001
 host = "127.0.0.1"
-users_file = "{users_path}"
+users_file = {users_path}
 
 [policy]
-policy_file = "{policy_path}"
-trusted_keys_file = "{pubkey_path}"
+policy_file = {policy_path}
+trusted_keys_file = {pubkey_path}
 policy_floor = 1
 "#,
-        region = opts.region,
-        users_path = users_file.display(),
-        policy_path = policy_file.display(),
-        pubkey_path = pubkey_file.display()
+        region = toml::Value::String(opts.region.to_owned()),
+        users_path = toml::Value::String("users.txt".to_owned()),
+        policy_path = toml::Value::String("policy.signed.json".to_owned()),
+        pubkey_path = toml::Value::String("admin.pub".to_owned())
     );
 
     if let Err(e) = std::fs::write(&config_file, toml_content) {

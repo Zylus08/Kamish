@@ -5,7 +5,6 @@ use kamish_enforce::Enforcer;
 use kamish_gateway::{GatewayState, app};
 use kamish_meta::MetadataStore;
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -19,6 +18,7 @@ pub struct StartOptions<'a> {
     pub host: &'a str,
     pub dev: bool,
     pub insecure_dev: bool,
+    pub allowed_origins: Option<&'a str>,
 }
 
 pub fn discover_config_file(explicit: Option<&str>) -> Result<Option<PathBuf>, String> {
@@ -206,6 +206,40 @@ pub async fn run_start(opts: StartOptions<'_>) -> Result<(), Box<dyn std::error:
     let audit_log = kamish_audit::AuditLog::open(data_path.join("audit.log"))?;
     let (policy_cache, _signing_key) =
         kamish_gateway::create_default_policy_cache(&[effective_region, "US_EAST", "AP_SOUTH"]);
+    // Honor the signing authority provisioned by `kamish init`.
+    if let Some(ref config_path) = found_config {
+        let content = std::fs::read_to_string(config_path)?;
+        let config: toml::Value = toml::from_str(&content)?;
+        if let Some(policy) = config.get("policy") {
+            let resolve = |key: &str| -> Result<PathBuf, Box<dyn std::error::Error>> {
+                let value = policy
+                    .get(key)
+                    .and_then(toml::Value::as_str)
+                    .ok_or_else(|| format!("Missing policy setting '{key}'"))?;
+                let path = PathBuf::from(value);
+                Ok(if path.is_absolute() {
+                    path
+                } else {
+                    config_path.parent().unwrap_or(Path::new(".")).join(path)
+                })
+            };
+            let keys = kamish_policy::load_trusted_keys_from_file(resolve("trusted_keys_file")?)?;
+            let floor = policy
+                .get("policy_floor")
+                .and_then(toml::Value::as_integer)
+                .unwrap_or(1);
+            let floor = u64::try_from(floor)?;
+            let signed = kamish_policy::load_verified_policy_from_file(
+                resolve("policy_file")?,
+                &keys,
+                floor,
+                chrono::Utc::now().timestamp(),
+            )?;
+            let mut cache = kamish_policy::PolicyCache::new(keys).with_version_floor(floor);
+            cache.update(signed, chrono::Utc::now().timestamp())?;
+            *policy_cache.write().unwrap() = cache;
+        }
+    }
     let enforcer = Arc::new(Enforcer::new(effective_region, policy_cache, audit_log));
     let meta = Arc::new(MetadataStore::new());
 
@@ -296,23 +330,13 @@ pub async fn run_start(opts: StartOptions<'_>) -> Result<(), Box<dyn std::error:
         crate::seed::seed_development_data(&broker);
     }
 
-    // 5. Consensus / Mode Check
-    let etcd_online = std::net::TcpStream::connect_timeout(
-        &SocketAddr::from(([127, 0, 0, 1], 2379)),
-        std::time::Duration::from_millis(250),
-    )
-    .is_ok();
+    println!("{yellow}[kamish start] SINGLE-NODE mode (authority: LOCAL_IN_MEMORY).{reset}");
 
-    if etcd_online {
-        println!(
-            "{green}[kamish start] Connected to etcd quorum consensus member at 127.0.0.1:2379.{reset}"
-        );
-    } else {
-        println!(
-            "{yellow}[kamish start] Running in SINGLE-NODE mode (authority: LOCAL_PERSISTENT_STORAGE).{reset}\n\
-             {yellow}             Multi-region CAS ownership and lease fencing require etcd quorum (run 'kamish doctor' for guidance).{reset}"
-        );
-    }
+    let renewal_task = broker.start_lease_renewal_worker(
+        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(1),
+        10_000,
+    );
 
     // 6. Start Framed TCP Broker Listener
     let broker_bind_addr = format!("{}:{}", effective_host, effective_broker_port);
@@ -320,7 +344,18 @@ pub async fn run_start(opts: StartOptions<'_>) -> Result<(), Box<dyn std::error:
         broker.clone().start_tcp_listener(&broker_bind_addr).await?;
 
     // 7. Build Axum Router combining Gateway API and Embedded Static Assets
-    let state = GatewayState::new_with_store(broker, user_store);
+    let origins = opts
+        .allowed_origins
+        .map(str::to_owned)
+        .unwrap_or_else(|| std::env::var("KAMISH_GATEWAY_ALLOWED_ORIGINS").unwrap_or_default());
+    let allowed_origins = origins
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let state = GatewayState::new_with_store(broker.clone(), user_store)
+        .with_allowed_origins(allowed_origins);
     let gateway_router = app(state);
     let complete_app = gateway_router.fallback(static_handler);
 
@@ -343,15 +378,19 @@ pub async fn run_start(opts: StartOptions<'_>) -> Result<(), Box<dyn std::error:
     println!("Press Ctrl+C to shut down cleanly.\n");
 
     // 8. Serve with graceful shutdown on SIGINT / SIGTERM
-    axum::serve(listener, complete_app)
+    let server_result = axum::serve(listener, complete_app)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c()
                 .await
                 .expect("Failed to install Ctrl+C signal handler");
             println!("\n[kamish] Received shutdown signal. Gracefully draining connections...");
         })
-        .await?;
+        .await;
 
+    broker.stop_lease_renewal();
+    let _ = renewal_task.await;
+    _broker_handle.abort();
+    server_result?;
     println!("[kamish] Clean shutdown complete.");
     Ok(())
 }

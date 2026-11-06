@@ -98,89 +98,33 @@ pub fn verify_policy(policy_path: &str, trusted_keys_path: &str) -> i32 {
     }
 }
 
-pub async fn publish_policy(policy_path: &str, gateway_url: &str) -> i32 {
-    let policy_str = match std::fs::read_to_string(policy_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error reading policy file '{policy_path}': {e}");
-            return 1;
-        }
-    };
-
-    // Verify it parses as SignedPolicy before publishing
-    if let Err(e) = serde_json::from_str::<SignedPolicy>(&policy_str) {
-        eprintln!("Error: '{policy_path}' is not a valid signed policy: {e}");
-        return 1;
+pub async fn publish_policy(
+    policy_path: &str,
+    gateway_url: &str,
+    auth: crate::status::AuthOptions<'_>,
+) -> i32 {
+    let result = async {
+        let policy_str = std::fs::read_to_string(policy_path)?;
+        let signed: SignedPolicy = serde_json::from_str(&policy_str)?;
+        signed.verify_signature()?;
+        let token = crate::status::get_or_login_token(gateway_url, auth).await?;
+        crate::status::post_authenticated_json(
+            gateway_url,
+            "/api/policy/publish",
+            &serde_json::to_value(signed)?,
+            &token,
+        )
+        .await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
     }
-
-    let parsed_url = match axum::http::Uri::try_from(format!(
-        "{}/api/policy/publish",
-        gateway_url.trim_end_matches('/')
-    )) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("Invalid gateway URL '{gateway_url}': {e}");
-            return 1;
-        }
-    };
-
-    let host = parsed_url.host().unwrap_or("127.0.0.1");
-    let port = parsed_url.port_u16().unwrap_or(3001);
-    let path = parsed_url
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/api/policy/publish");
-
-    let stream = match tokio::net::TcpStream::connect(format!("{host}:{port}")).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Cannot connect to gateway at {host}:{port}: {e}");
-            return 1;
-        }
-    };
-
-    let io = hyper_util::rt::TokioIo::new(stream);
-    let (mut sender, conn) = match hyper::client::conn::http1::handshake(io).await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("HTTP handshake failed: {e}");
-            return 1;
-        }
-    };
-
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let req = match hyper::Request::builder()
-        .method(hyper::Method::POST)
-        .uri(path)
-        .header(hyper::header::HOST, host)
-        .header(hyper::header::CONTENT_TYPE, "application/json")
-        .body(http_body_util::Full::new(hyper::body::Bytes::from(
-            policy_str,
-        ))) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to construct publish request: {e}");
-            return 1;
-        }
-    };
-
-    match sender.send_request(req).await {
-        Ok(res) if res.status().is_success() => {
-            println!(
-                "[kamish policy publish] Policy successfully published and activated on gateway cluster."
-            );
+    .await;
+    match result {
+        Ok(()) => {
+            println!("[kamish policy publish] Signed policy verified and activated by gateway.");
             0
         }
-        Ok(res) => {
-            let status = res.status();
-            eprintln!("Gateway rejected policy publication with status: {status}");
-            1
-        }
-        Err(e) => {
-            eprintln!("Failed to send policy to gateway: {e}");
+        Err(error) => {
+            eprintln!("Policy publication failed: {error}");
             1
         }
     }

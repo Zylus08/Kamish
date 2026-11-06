@@ -12,7 +12,7 @@ use kamish_meta::{
     ResidencyPolicy, StreamEvent, SyntheticChaosInjector,
 };
 use kamish_outbox::{BackpressureRule, DestinationOutbox, OutboxRange};
-use std::time::Instant;
+use tokio::time::Instant;
 
 /// Scenario A (Gate 2 / Demo A Ready):
 /// Ingest restricted event in EU_WEST -> Egress replication to US_EAST is blocked ->
@@ -70,7 +70,7 @@ fn test_scenario_a_residency_enforcement_demo() {
 
 /// Scenario B (Gate 3 / Demo B Ready):
 /// Injected 300ms WAN delay increases replication lag without degrading local produce throughput.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_scenario_b_slow_link_and_backpressure_demo() {
     let metrics = ReplicationMetricsTracker::new();
     let chaos = SyntheticChaosInjector::new();
@@ -136,8 +136,13 @@ async fn test_scenario_b_slow_link_and_backpressure_demo() {
     }
     let local_duration_degraded = start_degraded.elapsed();
 
-    // Local produce remains within orders of magnitude, unaffected by 300ms network delay
-    assert!(local_duration_degraded < std::time::Duration::from_millis(150));
+    // This synthetic test checks timer coupling, not physical fsync performance.
+    // Disk/scheduler speed on a shared runner must not decide correctness.
+    assert_eq!(
+        local_duration_degraded,
+        std::time::Duration::ZERO,
+        "Local appends must not await the injected WAN timer"
+    );
 
     // Replication lag should now reflect the queued, un-acked records (150 local - 100 acked = 50 lag)
     let lag = metrics.get_replication_lag("orders", 0, &RegionId::UsEast);
@@ -147,12 +152,17 @@ async fn test_scenario_b_slow_link_and_backpressure_demo() {
     );
 
     // Replicate one batch through chaos simulation
+    let start_traversal = Instant::now();
     let traverse_res = chaos.simulate_link_traversal().await;
     assert!(traverse_res.is_ok());
+    assert_eq!(
+        start_traversal.elapsed(),
+        std::time::Duration::from_millis(300)
+    );
 
     let avg_per_record = local_duration_degraded / 50;
     println!(
-        " [DEMO SCENARIO B PASSED] Injected 300ms delay increased replication lag to 50 without blocking local produce (50-record batch duration: {:?}, calculated avg per record: {:?}).",
+        " [DEMO SCENARIO B PASSED] Synthetic 300ms WAN timer increased lag to 50 without advancing the local-append timer (virtual batch duration: {:?}, virtual avg per record: {:?}).",
         local_duration_degraded, avg_per_record
     );
 }

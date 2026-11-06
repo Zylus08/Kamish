@@ -16,11 +16,17 @@ pub fn seed_development_data(broker: &Arc<BrokerServer>) {
         return;
     }
 
-    println!("[kamish dev] Seeding realistic enterprise multi-partition event streams and audit trails...");
+    println!(
+        "[kamish dev] Seeding realistic enterprise multi-partition event streams and audit trails..."
+    );
 
     let mut pid: u64 = 100_000;
 
-    let mut produce = |topic: &str, partition: u32, class_id: &str, policy: Option<ResidencyPolicy>, val: serde_json::Value| {
+    let mut produce = |topic: &str,
+                       partition: u32,
+                       class_id: &str,
+                       policy: Option<ResidencyPolicy>,
+                       val: serde_json::Value| {
         pid += 1;
         let payload = serde_json::to_vec(&val).unwrap_or_default();
         let req = ProduceRequest {
@@ -308,7 +314,7 @@ pub fn seed_development_data(broker: &Arc<BrokerServer>) {
         Some(ResidencyPolicy::StrictLocal),
         json!({
             "telemetry_type": "CONTINUOUS_GLUCOSE_MONITORING_STREAM",
-            "patient_identifier_token": "CGM-SOV-PATIENT-0914",
+            "patient_identifier_token": "demo-patient-0914",
             "glucose_value_mg_dl": 114.2,
             "sensor_trend": "STABLE_FLAT",
             "calibration_factor": 0.994,
@@ -340,7 +346,10 @@ pub fn seed_development_data(broker: &Arc<BrokerServer>) {
         "cross-border-kyc-registry",
         0,
         "sovereign-class",
-        Some(ResidencyPolicy::RestrictedReplication(vec![RegionId::EuWest, RegionId::UsEast])),
+        Some(ResidencyPolicy::RestrictedReplication(vec![
+            RegionId::EuWest,
+            RegionId::UsEast,
+        ])),
         json!({
             "compliance_protocol": "FATF_RECOMMENDATION_16_TRAVEL_RULE",
             "transfer_id": "FATF-TR-20261101-99824",
@@ -356,7 +365,10 @@ pub fn seed_development_data(broker: &Arc<BrokerServer>) {
         "cross-border-kyc-registry",
         0,
         "sovereign-class",
-        Some(ResidencyPolicy::RestrictedReplication(vec![RegionId::EuWest, RegionId::UsEast])),
+        Some(ResidencyPolicy::RestrictedReplication(vec![
+            RegionId::EuWest,
+            RegionId::UsEast,
+        ])),
         json!({
             "compliance_protocol": "PEP_SANCTIONS_BATCH_SWEEP",
             "batch_id": "PEP-SWEEP-20261101-EU",
@@ -372,7 +384,10 @@ pub fn seed_development_data(broker: &Arc<BrokerServer>) {
         "cross-border-kyc-registry",
         1,
         "sovereign-class",
-        Some(ResidencyPolicy::RestrictedReplication(vec![RegionId::EuWest, RegionId::UsEast])),
+        Some(ResidencyPolicy::RestrictedReplication(vec![
+            RegionId::EuWest,
+            RegionId::UsEast,
+        ])),
         json!({
             "trust_framework": "EIDAS_2_0_QUALIFIED_TRUST_SERVICE",
             "qtsp_name": "D-Trust GmbH (Bundesdruckerei Group)",
@@ -388,7 +403,10 @@ pub fn seed_development_data(broker: &Arc<BrokerServer>) {
         "cross-border-kyc-registry",
         2,
         "sovereign-class",
-        Some(ResidencyPolicy::RestrictedReplication(vec![RegionId::EuWest, RegionId::UsEast])),
+        Some(ResidencyPolicy::RestrictedReplication(vec![
+            RegionId::EuWest,
+            RegionId::UsEast,
+        ])),
         json!({
             "registry_type": "BENEFICIAL_OWNERSHIP_TRANSPARENCY",
             "corporate_registry_number": "HRB-981245-BERLIN",

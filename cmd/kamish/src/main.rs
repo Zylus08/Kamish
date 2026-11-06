@@ -27,6 +27,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Start the sovereign broker, gateway API, and embedded dashboard in one process
+    #[command(alias = "run")]
     Start {
         /// Path to TOML configuration file
         #[arg(short, long)]
@@ -59,6 +60,10 @@ enum Commands {
         /// Explicit opt-in for binding non-loopback interface without TLS
         #[arg(long, default_value_t = false)]
         insecure_dev: bool,
+
+        /// Exact allowed CORS origins for separate-origin deployments
+        #[arg(long)]
+        allowed_origins: Option<String>,
     },
 
     /// Run comprehensive prerequisite diagnostics (versions, ports, consensus, certificates)
@@ -309,12 +314,7 @@ enum TopicCommands {
         partitions: usize,
 
         /// Authorized classification classes
-        #[arg(
-            short,
-            long,
-            value_delimiter = ',',
-            default_value = "sovereign-class,general"
-        )]
+        #[arg(short, long, value_delimiter = ',', default_value = "general")]
         classes: Vec<String>,
 
         /// Target Gateway URL
@@ -395,6 +395,13 @@ enum PolicyCommands {
         /// Target Gateway URL
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         gateway_url: String,
+        /// Pre-authenticated bearer token
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(short, long)]
+        username: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
     },
 }
 
@@ -412,6 +419,7 @@ async fn main() {
             host,
             dev,
             insecure_dev,
+            allowed_origins,
         } => {
             let opts = start::StartOptions {
                 config: config.as_deref(),
@@ -422,6 +430,7 @@ async fn main() {
                 host: &host,
                 dev,
                 insecure_dev,
+                allowed_origins: allowed_origins.as_deref(),
             };
             match start::run_start(opts).await {
                 Ok(_) => 0,
@@ -550,7 +559,21 @@ async fn main() {
             PolicyCommands::Publish {
                 policy,
                 gateway_url,
-            } => policy_cmd::publish_policy(&policy, &gateway_url).await,
+                token,
+                username,
+                password,
+            } => {
+                policy_cmd::publish_policy(
+                    &policy,
+                    &gateway_url,
+                    status::AuthOptions {
+                        token: token.as_deref(),
+                        username: username.as_deref(),
+                        password: password.as_deref(),
+                    },
+                )
+                .await
+            }
         },
 
         Commands::VerifyAudit {

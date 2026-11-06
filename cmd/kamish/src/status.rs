@@ -125,66 +125,95 @@ pub async fn fetch_authenticated_json<T: for<'de> Deserialize<'de>>(
     url_str: &str,
     token: &str,
 ) -> Result<T, Box<dyn std::error::Error>> {
-    let parsed: axum::http::Uri = url_str.parse()?;
-    let host = parsed.host().unwrap_or("127.0.0.1");
-    let port = parsed.port_u16().unwrap_or(3001);
-    let path = parsed.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let bytes = request_json(url_str, hyper::Method::GET, None, Some(token), None).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
 
-    let stream = tokio::net::TcpStream::connect(format!("{host}:{port}")).await?;
-    let io = hyper_util::rt::TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
-
-    tokio::spawn(async move {
-        let _ = conn.await;
-    });
-
-    let req = hyper::Request::builder()
-        .uri(path)
-        .header(hyper::header::HOST, host)
-        .header(hyper::header::USER_AGENT, "kamish-cli")
-        .header(hyper::header::AUTHORIZATION, format!("Bearer {token}"))
-        .header(hyper::header::COOKIE, format!("kamish_session={token}"))
-        .body(http_body_util::Empty::<hyper::body::Bytes>::new())?;
-
-    let res = sender.send_request(req).await?;
-    let bytes = http_body_util::BodyExt::collect(res.into_body())
-        .await?
-        .to_bytes();
-    let val: T = serde_json::from_slice(&bytes)?;
-    Ok(val)
+pub async fn post_authenticated_json(
+    gateway_url: &str,
+    endpoint: &str,
+    body: &serde_json::Value,
+    token: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let base = gateway_url.trim_end_matches('/');
+    let me: serde_json::Value =
+        fetch_authenticated_json(&format!("{base}/api/auth/me"), token).await?;
+    let csrf = me["csrf_token"]
+        .as_str()
+        .ok_or("Gateway did not return a CSRF token")?;
+    let bytes = request_json(
+        &format!("{base}{endpoint}"),
+        hyper::Method::POST,
+        Some(body),
+        Some(token),
+        Some(csrf),
+    )
+    .await?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 pub async fn post_json_raw(
     url_str: &str,
     body: &serde_json::Value,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let parsed: axum::http::Uri = url_str.parse()?;
-    let host = parsed.host().unwrap_or("127.0.0.1");
-    let port = parsed.port_u16().unwrap_or(3001);
-    let path = parsed.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    request_json(url_str, hyper::Method::POST, Some(body), None, None).await
+}
 
-    let stream = tokio::net::TcpStream::connect(format!("{host}:{port}")).await?;
+async fn request_json(
+    url_str: &str,
+    method: hyper::Method,
+    body: Option<&serde_json::Value>,
+    token: Option<&str>,
+    csrf: Option<&str>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let parsed: axum::http::Uri = url_str.parse()?;
+    if parsed.scheme_str() != Some("http") {
+        return Err("CLI gateway URL must use http://; HTTPS transport is not configured".into());
+    }
+    let host = parsed.host().ok_or("Gateway URL must include a host")?;
+    let port = parsed.port_u16().unwrap_or(80);
+    let path = parsed.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let stream = tokio::net::TcpStream::connect((host, port)).await?;
     let io = hyper_util::rt::TokioIo::new(stream);
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
-
     tokio::spawn(async move {
         let _ = conn.await;
     });
-
-    let bytes = serde_json::to_vec(body)?;
-    let req = hyper::Request::builder()
-        .method(hyper::Method::POST)
+    let mut req = hyper::Request::builder()
+        .method(method)
         .uri(path)
-        .header(hyper::header::HOST, host)
+        .header(
+            hyper::header::HOST,
+            parsed.authority().ok_or("Missing gateway host")?.as_str(),
+        )
         .header(hyper::header::CONTENT_TYPE, "application/json")
-        .body(http_body_util::Full::new(hyper::body::Bytes::from(bytes)))?;
-
-    let res = sender.send_request(req).await?;
-    let resp_bytes = http_body_util::BodyExt::collect(res.into_body())
+        .header(hyper::header::USER_AGENT, "kamish-cli");
+    if let Some(token) = token {
+        req = req.header(hyper::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    if let Some(csrf) = csrf {
+        req = req.header("x-csrf-token", csrf);
+    }
+    let bytes = body
+        .map(serde_json::to_vec)
+        .transpose()?
+        .unwrap_or_default();
+    let res = sender
+        .send_request(req.body(http_body_util::Full::new(hyper::body::Bytes::from(bytes)))?)
+        .await?;
+    let status = res.status();
+    let bytes = http_body_util::BodyExt::collect(res.into_body())
         .await?
         .to_bytes()
         .to_vec();
-    Ok(resp_bytes)
+    if !status.is_success() {
+        return Err(format!(
+            "Gateway returned {status}: {}",
+            String::from_utf8_lossy(&bytes)
+        )
+        .into());
+    }
+    Ok(bytes)
 }
 
 fn render_status_table(status: &ClusterStatus, auth: &AuthorityStatus) {

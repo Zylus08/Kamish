@@ -30,6 +30,9 @@ fn apply_csp_and_security_headers(headers: &mut HeaderMap) {
 /// Fallback static file handler for the embedded dashboard and local models
 pub async fn static_handler(uri: Uri) -> Response {
     let raw_path = uri.path().trim_start_matches('/');
+    if !kamish_gateway::safe_asset_path(raw_path) || raw_path.starts_with("api/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let path = if raw_path.is_empty() {
         INDEX_HTML
     } else {
@@ -47,8 +50,8 @@ pub async fn static_handler(uri: Uri) -> Response {
         ];
 
         for dir in &candidate_dirs {
-            let file_path = dir.join(model_filename);
-            if file_path.is_file()
+            if let Some(file_path) =
+                kamish_gateway::contained_asset_file(dir, &dir.join(model_filename))
                 && let Ok(bytes) = tokio::fs::read(&file_path).await
             {
                 let mut headers = HeaderMap::new();

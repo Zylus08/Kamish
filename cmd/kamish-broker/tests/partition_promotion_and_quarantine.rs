@@ -181,11 +181,11 @@ async fn test_promotion_rejects_unexpired_lease() {
 
 #[tokio::test]
 async fn test_promotion_rejects_behind_replica_watermark() {
-    let (broker_a, broker_b, _dir_a, _dir_b, _meta) = setup_two_region_cluster();
+    let (broker_a, broker_b, _dir_a, _dir_b, meta) = setup_two_region_cluster();
 
-    // 1. Region A claims partition at epoch 1 with 100ms lease
+    // 1. Region A claims partition at epoch 1 with a lease valid throughout fixture setup
     broker_a
-        .claim_partition_ownership("watermark-topic", 0, 0, 1, 100)
+        .claim_partition_ownership("watermark-topic", 0, 0, 1, 30_000)
         .unwrap();
 
     // Region A produces 3 records
@@ -205,7 +205,14 @@ async fn test_promotion_rejects_behind_replica_watermark() {
     }
 
     // 2. Wait for lease to expire
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    // Expire the in-memory test grant only after staging durable records.
+    // This fixture must not race Windows fsync against a 100/150 ms TTL.
+    meta.grant_lease(
+        &kamish_meta::StreamId::new("watermark-topic", 0),
+        "region-a",
+        -1000,
+    )
+    .unwrap();
 
     // 3. Region B attempts promotion requiring watermark 3, but Region B has 0 records locally
     let err = broker_b
@@ -221,11 +228,11 @@ async fn test_promotion_rejects_behind_replica_watermark() {
 
 #[tokio::test]
 async fn test_promotion_success_fences_old_owner_and_quarantines_divergent_suffix() {
-    let (broker_a, broker_b, _dir_a, _dir_b, _meta) = setup_two_region_cluster();
+    let (broker_a, broker_b, _dir_a, _dir_b, meta) = setup_two_region_cluster();
 
-    // 1. Region A claims partition at epoch 1 with 150ms lease
+    // 1. Region A claims partition at epoch 1 with a lease valid throughout fixture setup
     broker_a
-        .claim_partition_ownership("failover-topic", 0, 0, 1, 150)
+        .claim_partition_ownership("failover-topic", 0, 0, 1, 30_000)
         .unwrap();
 
     // Region A writes 2 committed records (offset 0 and 1)
@@ -320,7 +327,14 @@ async fn test_promotion_success_fences_old_owner_and_quarantines_divergent_suffi
     );
 
     // 3. Region A's lease expires
-    tokio::time::sleep(Duration::from_millis(380)).await;
+    // Expire the in-memory test grant only after staging durable records.
+    // This fixture must not race Windows fsync against a 100/150 ms TTL.
+    meta.grant_lease(
+        &kamish_meta::StreamId::new("failover-topic", 0),
+        "region-a",
+        -1000,
+    )
+    .unwrap();
 
     // 4. Region B detects outage and promotes partition with required watermark 2
     let promoted_ownership = broker_b
@@ -519,11 +533,11 @@ async fn test_promotion_cas_conflict_and_ambiguity_handling() {
 
 #[tokio::test]
 async fn test_promotion_reconciliation_ordering_isolates_suffix_before_cas() {
-    let (broker_a, broker_b, _dir_a, _dir_b, _meta) = setup_two_region_cluster();
+    let (broker_a, broker_b, _dir_a, _dir_b, meta) = setup_two_region_cluster();
 
-    // 1. Region A claims partition at epoch 1 with 150ms lease and writes 2 records
+    // 1. Region A claims partition at epoch 1 with a lease valid throughout fixture setup and writes 2 records
     broker_a
-        .claim_partition_ownership("order-topic", 0, 0, 1, 150)
+        .claim_partition_ownership("order-topic", 0, 0, 1, 30_000)
         .unwrap();
     for seq in 0..2 {
         broker_a
@@ -581,7 +595,14 @@ async fn test_promotion_reconciliation_ordering_isolates_suffix_before_cas() {
     assert_eq!(log_b.next_offset(), 3);
 
     // Lease expires
-    tokio::time::sleep(Duration::from_millis(380)).await;
+    // Expire the in-memory test grant only after staging durable records.
+    // This fixture must not race Windows fsync against a 100/150 ms TTL.
+    meta.grant_lease(
+        &kamish_meta::StreamId::new("order-topic", 0),
+        "region-a",
+        -1000,
+    )
+    .unwrap();
 
     // Promotion with required watermark 2 must isolate speculative record 2 to quarantine
     // and truncate log to 2 before CAS commits epoch 2

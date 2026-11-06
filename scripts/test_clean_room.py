@@ -32,9 +32,6 @@ def wait_for_port(port, timeout=10.0):
     return False
 
 def main():
-    subprocess.run("pkill -9 -f 'kamish start' || true", shell=True)
-    time.sleep(0.5)
-
     clean_dir = "/tmp/kamish_cleanroom"
     global_prefix = os.path.join(clean_dir, "global_prefix")
     sdk_test = os.path.join(clean_dir, "sdk_test")
@@ -47,6 +44,8 @@ def main():
     os.makedirs(global_prefix, exist_ok=True)
     os.makedirs(sdk_test, exist_ok=True)
     os.makedirs(cluster_dir, exist_ok=True)
+
+    os.makedirs("packages/kamish-linux-x64/bin", exist_ok=True)
 
     # 0. Ensure native binary and packaged tarballs exist
     if not os.path.exists("packages/kamish-linux-x64/bin/kamish") or os.path.getsize("packages/kamish-linux-x64/bin/kamish") < 1024:
@@ -63,10 +62,11 @@ def main():
 const client = new KamishClient({ allowInsecure: true, host: "127.0.0.1", port: 9092 });
 console.log("SDK client instantiated successfully with maxPayloadBytes:", client.maxPayloadBytes);
 """
-    with open(os.path.join(sdk_test, "test.ts"), "w") as f:
+    with open(os.path.join(sdk_test, "test.mts"), "w") as f:
         f.write(test_ts)
     
-    run_cmd("SDK Typecheck", "npx -y typescript --noEmit test.ts", cwd=sdk_test)
+    run_cmd("SDK Typecheck Dependencies", "npm install --save-dev typescript@5.9.3 @types/node@22.20.5", cwd=sdk_test)
+    run_cmd("SDK Typecheck", "npx tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext test.mts", cwd=sdk_test)
 
     # 2. Global CLI Install from Tarball
     print("--- 2. Testing Global CLI Tarball Installation ---")
