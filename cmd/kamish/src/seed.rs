@@ -314,7 +314,7 @@ pub fn seed_development_data(broker: &Arc<BrokerServer>) {
         Some(ResidencyPolicy::StrictLocal),
         json!({
             "telemetry_type": "CONTINUOUS_GLUCOSE_MONITORING_STREAM",
-            "patient_identifier_token": "CGM-SOV-PATIENT-0914",
+            "patient_identifier_token": "demo-patient-0914",
             "glucose_value_mg_dl": 114.2,
             "sensor_trend": "STABLE_FLAT",
             "calibration_factor": 0.994,
