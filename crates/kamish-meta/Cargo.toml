@@ -15,6 +15,7 @@ chrono = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 kamish-log = { path = "../kamish-log" }
 kamish-outbox = { path = "../kamish-outbox" }
 tempfile = "3.17"

@@ -30,3 +30,21 @@ No external etcd cluster, KMS, independent witness service, production browser d
 registry publication, or cross-platform native runtime was verified in this pass. Policy
 publication updates the running cache; persistent multi-region policy rollout remains outside
 this local-runtime verification. Historical 261-test evidence retains its original source scope.
+
+## CI follow-up
+
+Clean-runner checks exposed missing protoc/include files and frontend assets plus an
+incorrect root-level npm cache path. The workflow now provisions official protoc
+30.2 and builds embedded assets before Rust jobs, and caches the nested lockfiles.
+The compiler bootstrap was executed successfully on Linux.
+
+Windows exposed unescaped absolute paths in generated TOML. Init now writes portable
+config-relative filenames using TOML serialization. The Linux runner exposed an
+existing 150 ms physical-fsync assertion in a synthetic WAN test; that test now
+uses a paused Tokio clock to verify that local writes do not consume the WAN timer
+and that explicit traversal consumes exactly the configured virtual 300 ms.
+
+GitGuardian incident 39376497 concerns the synthetic `patient_identifier_token`
+fixture in commit `8745636`, not a credential. The head uses an obvious demo identifier.
+The external scanner continues to report the historical occurrence; history was
+not rewritten and the scanner was not disabled.

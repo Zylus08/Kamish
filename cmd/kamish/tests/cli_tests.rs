@@ -83,6 +83,14 @@ fn test_init_and_idempotence_guard() {
     assert!(temp_dir.path().join("admin.key").exists());
     assert!(temp_dir.path().join("admin.pub").exists());
     assert!(temp_dir.path().join("policy.signed.json").exists());
+    let config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(temp_dir.path().join("kamish.toml")).unwrap())
+            .unwrap();
+    assert_eq!(config["gateway"]["users_file"].as_str(), Some("users.txt"));
+    assert_eq!(
+        config["policy"]["trusted_keys_file"].as_str(),
+        Some("admin.pub")
+    );
 
     // Without force, second init must refuse to overwrite
     let opts_second = kamish::init::InitOptions {
@@ -281,7 +289,7 @@ async fn unified_start_serves_tcp_and_renews_leases_past_initial_expiry() {
         ])
         .current_dir(dir.path())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
